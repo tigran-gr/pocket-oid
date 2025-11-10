@@ -1,0 +1,10 @@
+{
+  "iss": "${issuer}",
+  "sub": "${client_id}",
+  "aud": "${audience}",
+  "iat": "${issued_at}",
+  "exp": "${expires_at}",
+  "jti": "${uuid}",
+  "scope": "${scope}",
+  "tenant": "${metadata.tenant}"
+}

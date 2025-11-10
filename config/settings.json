@@ -1,0 +1,11 @@
+{
+  "issuer": "http://localhost:8080",
+  "token_ttl_seconds": 3600,
+  "signing_keys": [
+    {
+      "id": "primary",
+      "private_key_path": "config/keys/signing-key.pem",
+      "algorithm": "RS256"
+    }
+  ]
+}

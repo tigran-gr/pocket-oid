@@ -1,0 +1,13 @@
+[
+  {
+    "client_id": "svc-alpha",
+    "client_secret": "supersecret",
+    "audience": "https://api.example.com",
+    "scopes": ["read", "write"],
+    "default_scope": "read",
+    "metadata": {
+      "tenant": "alpha"
+    },
+    "active": true
+  }
+]

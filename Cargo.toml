@@ -1,0 +1,20 @@
+[package]
+name = "pocket-oid"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+axum = { version = "0.7", features = ["macros"] }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+chrono = { version = "0.4", features = ["clock"] }
+jsonwebtoken = "9"
+rsa = { version = "0.9", features = ["pem"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+subtle = "2.5"
+thiserror = "1.0"
+tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.7", features = ["v4"] }
