@@ -17,14 +17,14 @@ async fn main() -> anyhow::Result<()> {
     let config_dir = std::env::var("POCKET_OID_CONFIG_DIR").unwrap_or_else(|_| "config".into());
     let state = AppState::initialize(Path::new(&config_dir))
         .with_context(|| format!("failed to initialize provider using config at {config_dir}"))?;
-    let router = state.router();
+    let router: axum::Router = state.router();
     let addr: SocketAddr = state
         .provider
         .listen
         .parse()
         .context("invalid listen address in provider configuration")?;
 
-    tracing::info!("starting pocket-oid", %addr, issuer = %state.provider.issuer);
+    tracing::info!(%addr, issuer = %state.provider.issuer, "starting pocket-oid");
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await

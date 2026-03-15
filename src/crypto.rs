@@ -5,6 +5,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use rsa::RsaPrivateKey;
 use rsa::pkcs8::DecodePrivateKey;
+use rsa::traits::PublicKeyParts;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 

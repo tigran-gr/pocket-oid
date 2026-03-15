@@ -65,7 +65,7 @@ impl AppState {
         })))
     }
 
-    pub fn router(&self) -> Router<AppState> {
+    pub fn router(&self) -> Router {
         Router::new()
             .route(
                 "/.well-known/openid-configuration",
