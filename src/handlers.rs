@@ -167,3 +167,73 @@ fn validate_scopes<'a>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    use crate::app::AppState;
+
+    fn config_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config")
+    }
+
+    #[tokio::test]
+    async fn fetches_access_token_with_client_credentials_flow() {
+        let state = AppState::initialize(&config_dir()).expect("app state should initialize");
+        let app = state.router();
+
+        let response = app
+            .oneshot(
+                Request::post("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "grant_type=client_credentials&client_id=svc-a&client_secret=supersecret",
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let token_response: Value =
+            serde_json::from_slice(&response_body).expect("token response should be valid JSON");
+
+        assert_eq!(token_response["token_type"], "Bearer");
+        assert_eq!(token_response["expires_in"], 3600);
+        assert_eq!(token_response["scope"], "default");
+
+        let access_token = token_response["access_token"]
+            .as_str()
+            .expect("access token should be present");
+        let public_key = fs::read(config_dir().join("keys").join("signing-key.pub"))
+            .expect("public key should be readable");
+        let decoding_key =
+            DecodingKey::from_rsa_pem(&public_key).expect("public key should parse");
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+        validation.set_issuer(&["https://pocket-oid.local"]);
+        validation.set_audience(&["https://api.example.local"]);
+
+        let token_data = decode::<Value>(access_token, &decoding_key, &validation)
+            .expect("access token should verify");
+
+        assert_eq!(token_data.claims["sub"], "svc-a");
+        assert_eq!(token_data.claims["scope"], "default");
+        assert_eq!(token_data.claims["custom"]["tenant"], "acme");
+        assert_eq!(token_data.claims["custom"]["env"], "dev");
+        assert!(token_data.claims["jti"].as_str().is_some());
+    }
+}
