@@ -176,7 +176,7 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode},
     };
-    use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+    use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
     use serde_json::Value;
     use tower::ServiceExt;
 
@@ -235,5 +235,101 @@ mod tests {
         assert_eq!(token_data.claims["custom"]["tenant"], "acme");
         assert_eq!(token_data.claims["custom"]["env"], "dev");
         assert!(token_data.claims["jti"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn fetches_access_token_with_jwks_key_discovered_from_well_known_config() {
+        let state = AppState::initialize(&config_dir()).expect("app state should initialize");
+        let app = state.router();
+
+        let token_response = app
+            .clone()
+            .oneshot(
+                Request::post("/oauth/token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "grant_type=client_credentials&client_id=svc-a&client_secret=supersecret",
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(token_response.status(), StatusCode::OK);
+
+        let token_body = to_bytes(token_response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let token_json: Value =
+            serde_json::from_slice(&token_body).expect("token response should be valid JSON");
+
+        let well_known_response = app
+            .clone()
+            .oneshot(
+                Request::get("/.well-known/openid-configuration")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(well_known_response.status(), StatusCode::OK);
+
+        let well_known_body = to_bytes(well_known_response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let well_known_json: Value = serde_json::from_slice(&well_known_body)
+            .expect("well-known response should be valid JSON");
+        let jwks_uri = well_known_json["jwks_uri"]
+            .as_str()
+            .expect("jwks_uri should be present");
+        let jwks_path = jwks_uri
+            .strip_prefix("https://pocket-oid.local")
+            .expect("jwks_uri should use configured issuer");
+
+        let jwks_response = app
+            .oneshot(
+                Request::get(jwks_path)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(jwks_response.status(), StatusCode::OK);
+
+        let jwks_body = to_bytes(jwks_response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let jwks_json: Value =
+            serde_json::from_slice(&jwks_body).expect("jwks response should be valid JSON");
+
+        let access_token = token_json["access_token"]
+            .as_str()
+            .expect("access token should be present");
+        let token_header = decode_header(access_token).expect("token header should decode");
+        let kid = token_header.kid.expect("token header should contain key id");
+
+        let jwk = jwks_json["keys"]
+            .as_array()
+            .expect("jwks keys should be an array")
+            .iter()
+            .find(|entry| entry["kid"].as_str() == Some(kid.as_str()))
+            .expect("jwks should include the signing key");
+        let modulus = jwk["n"].as_str().expect("jwk should include modulus");
+        let exponent = jwk["e"].as_str().expect("jwk should include exponent");
+
+        let decoding_key = DecodingKey::from_rsa_components(modulus, exponent)
+            .expect("jwk components should parse");
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+        validation.set_issuer(&["https://pocket-oid.local"]);
+        validation.set_audience(&["https://api.example.local"]);
+
+        let token_data = decode::<Value>(access_token, &decoding_key, &validation)
+            .expect("access token should verify");
+
+        assert_eq!(token_data.claims["sub"], "svc-a");
+        assert_eq!(token_data.claims["scope"], "default");
     }
 }
