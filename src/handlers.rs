@@ -167,3 +167,115 @@ fn validate_scopes<'a>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use axum::{
+        body::{self, Body},
+        http::{Method, Request, StatusCode},
+    };
+    use jsonwebtoken::{
+        Algorithm, DecodingKey, Validation, decode,
+        jwk::Jwk as JwtJwk,
+    };
+    use serde::Deserialize;
+    use serde_json::{Map, Value};
+    use tower::util::ServiceExt;
+
+    use crate::app::AppState;
+
+    #[derive(Debug, Deserialize)]
+    struct TokenResponseForTest {
+        access_token: String,
+    }
+
+    #[tokio::test]
+    async fn token_can_be_validated_using_jwks_uri_from_discovery_document() {
+        let state = AppState::initialize(Path::new("config")).expect("config should load");
+        let app = state.router();
+
+        let discovery = get_json::<Value>(
+            &app,
+            Method::GET,
+            "/.well-known/openid-configuration",
+            None,
+        )
+        .await;
+        let issuer = discovery
+            .get("issuer")
+            .and_then(Value::as_str)
+            .expect("discovery should include issuer");
+        let jwks_uri = discovery
+            .get("jwks_uri")
+            .and_then(Value::as_str)
+            .expect("discovery should include jwks_uri");
+
+        let jwks_path = jwks_uri
+            .strip_prefix(issuer)
+            .expect("jwks_uri should start with issuer");
+
+        let jwks = get_json::<Value>(&app, Method::GET, jwks_path, None).await;
+        let key = jwks
+            .get("keys")
+            .and_then(Value::as_array)
+            .and_then(|keys| keys.first())
+            .and_then(Value::as_object)
+            .expect("jwks should contain at least one key");
+        let kid = key
+            .get("kid")
+            .and_then(Value::as_str)
+            .expect("jwk should contain kid");
+
+        let jwk: JwtJwk = serde_json::from_value(Value::Object(key.clone()))
+            .expect("jwk should deserialize to jsonwebtoken::jwk::Jwk");
+
+        let token = get_json::<TokenResponseForTest>(
+            &app,
+            Method::POST,
+            "/oauth/token",
+            Some(
+                "grant_type=client_credentials&client_id=svc-a&client_secret=supersecret",
+            ),
+        )
+        .await;
+
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.validate_exp = false;
+        validation.validate_nbf = false;
+        validation.set_audience(&["https://api.example.local"]);
+
+        let decoded = decode::<Map<String, Value>>(
+            &token.access_token,
+            &DecodingKey::from_jwk(&jwk).expect("should build decoding key from jwk"),
+            &validation,
+        )
+        .expect("token should validate with jwk from jwks_uri");
+
+        assert_eq!(decoded.header.kid.as_deref(), Some(kid));
+    }
+
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        app: &axum::Router,
+        method: Method,
+        path: &str,
+        form: Option<&str>,
+    ) -> T {
+        let mut builder = Request::builder().method(method).uri(path);
+        if form.is_some() {
+            builder = builder.header("content-type", "application/x-www-form-urlencoded");
+        }
+        let request = builder
+            .body(Body::from(form.unwrap_or_default().to_string()))
+            .expect("request should build");
+        let response = ServiceExt::oneshot(app.clone(), request)
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        serde_json::from_slice(&bytes).expect("response should be valid json")
+    }
+}
