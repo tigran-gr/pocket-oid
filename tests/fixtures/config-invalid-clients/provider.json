@@ -1,0 +1,5 @@
+{
+  "issuer": "https://pocket-oid.local",
+  "token_ttl_seconds": 3600,
+  "listen": "127.0.0.1:18080"
+}

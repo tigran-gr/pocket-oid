@@ -1,0 +1,13 @@
+{
+  "iss": "https://pocket-oid.local",
+  "sub": "${client_id}",
+  "aud": "${audience}",
+  "scope": "${scope}",
+  "iat": "${issued_at}",
+  "exp": "${expires_at}",
+  "jti": "${uuid}",
+  "custom": {
+    "tenant": "${metadata.tenant}",
+    "env": "dev"
+  }
+}

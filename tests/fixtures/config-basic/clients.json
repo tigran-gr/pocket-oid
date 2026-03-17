@@ -1,0 +1,11 @@
+[
+  {
+    "client_id": "svc-a",
+    "client_secret": "supersecret",
+    "audience": "https://api.example.local",
+    "scopes": ["default"],
+    "metadata": {
+      "tenant": "acme"
+    }
+  }
+]
