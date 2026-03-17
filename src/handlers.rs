@@ -332,4 +332,40 @@ mod tests {
         assert_eq!(token_data.claims["sub"], "svc-a");
         assert_eq!(token_data.claims["scope"], "default");
     }
+
+    #[tokio::test]
+    async fn fetches_access_tokens_for_parallel_client_credentials_requests() {
+        let state = AppState::initialize(&config_dir()).expect("app state should initialize");
+        let app = state.router();
+
+        let request = || {
+            Request::post("/oauth/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "grant_type=client_credentials&client_id=svc-a&client_secret=supersecret",
+                ))
+                .expect("request should build")
+        };
+
+        let (first_response, second_response) = tokio::join!(
+            app.clone().oneshot(request()),
+            app.clone().oneshot(request())
+        );
+
+        for response in [first_response, second_response] {
+            let response = response.expect("request should succeed");
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response_body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("response body should read");
+            let token_response: Value =
+                serde_json::from_slice(&response_body).expect("token response should be valid JSON");
+
+            assert_eq!(token_response["token_type"], "Bearer");
+            assert_eq!(token_response["expires_in"], 3600);
+            assert_eq!(token_response["scope"], "default");
+            assert!(token_response["access_token"].as_str().is_some());
+        }
+    }
 }
