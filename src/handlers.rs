@@ -220,8 +220,7 @@ mod tests {
             .expect("access token should be present");
         let public_key = fs::read(config_dir().join("keys").join("signing-key.pub"))
             .expect("public key should be readable");
-        let decoding_key =
-            DecodingKey::from_rsa_pem(&public_key).expect("public key should parse");
+        let decoding_key = DecodingKey::from_rsa_pem(&public_key).expect("public key should parse");
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
         validation.set_issuer(&["https://pocket-oid.local"]);
@@ -308,7 +307,9 @@ mod tests {
             .as_str()
             .expect("access token should be present");
         let token_header = decode_header(access_token).expect("token header should decode");
-        let kid = token_header.kid.expect("token header should contain key id");
+        let kid = token_header
+            .kid
+            .expect("token header should contain key id");
 
         let jwk = jwks_json["keys"]
             .as_array()
@@ -359,8 +360,8 @@ mod tests {
             let response_body = to_bytes(response.into_body(), usize::MAX)
                 .await
                 .expect("response body should read");
-            let token_response: Value =
-                serde_json::from_slice(&response_body).expect("token response should be valid JSON");
+            let token_response: Value = serde_json::from_slice(&response_body)
+                .expect("token response should be valid JSON");
 
             assert_eq!(token_response["token_type"], "Bearer");
             assert_eq!(token_response["expires_in"], 3600);

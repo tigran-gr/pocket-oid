@@ -1,14 +1,7 @@
-mod app;
-mod config;
-mod crypto;
-mod error;
-mod handlers;
-mod token;
-
 use std::{net::SocketAddr, path::Path};
 
 use anyhow::Context;
-use app::AppState;
+use pocket_oid::app::AppState;
 use tracing_subscriber::{EnvFilter, fmt};
 
 #[tokio::main]
