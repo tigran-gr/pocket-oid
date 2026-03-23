@@ -13,6 +13,7 @@ use serde::Serialize;
 use tower_http::trace::TraceLayer;
 
 use crate::{
+    auth::AuthStore,
     config::{Client, LoadedConfig, ProviderSettings},
     crypto::{JwkSet, KeyMaterial, load_signing_key},
     error::AppError,
@@ -26,10 +27,12 @@ pub struct AppState(Arc<ApplicationState>);
 pub struct ApplicationState {
     pub provider: ProviderSettings,
     pub clients: HashMap<String, Client>,
+    pub users: HashMap<String, crate::config::User>,
     pub token_template: TokenTemplate,
     pub signing_key: KeyMaterial,
     pub jwk_set: JwkSet,
     pub discovery: DiscoveryDocument,
+    pub auth_store: AuthStore,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,10 +61,12 @@ impl AppState {
         Ok(Self(Arc::new(ApplicationState {
             provider: config.provider,
             clients: config.clients,
+            users: config.users,
             token_template: TokenTemplate::new(config.token_template),
             signing_key,
             jwk_set,
             discovery,
+            auth_store: AuthStore::default(),
         })))
     }
 
@@ -73,6 +78,9 @@ impl AppState {
             )
             .route("/jwks.json", get(handlers::jwks))
             .route("/oauth/token", post(handlers::token_endpoint))
+            .route("/authorize", get(handlers::authorize))
+            .route("/login", post(handlers::login))
+            .route("/consent", post(handlers::consent))
             .route("/healthz", get(handlers::healthz))
             .route("/readyz", get(handlers::readyz))
             .with_state(self.clone())
@@ -97,8 +105,11 @@ impl DiscoveryDocument {
             issuer,
             token_endpoint,
             jwks_uri,
-            grant_types_supported: vec!["client_credentials".to_string()],
-            response_types_supported: vec!["token".to_string()],
+            grant_types_supported: vec![
+                "client_credentials".to_string(),
+                "authorization_code".to_string(),
+            ],
+            response_types_supported: vec!["code".to_string(), "token".to_string()],
             subject_types_supported: vec!["public".to_string()],
             token_endpoint_auth_methods_supported: vec!["client_secret_post".to_string()],
             id_token_signing_alg_values_supported: vec!["RS256".to_string()],

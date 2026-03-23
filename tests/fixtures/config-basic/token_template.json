@@ -1,6 +1,6 @@
 {
   "iss": "https://pocket-oid.local",
-  "sub": "${client_id}",
+  "sub": "${subject}",
   "aud": "${audience}",
   "scope": "${scope}",
   "iat": "${issued_at}",

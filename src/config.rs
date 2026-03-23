@@ -37,6 +37,15 @@ pub struct ClientConfig {
     #[serde(default)]
     #[schemars(default)]
     pub token_ttl_seconds: Option<u64>,
+    #[serde(default)]
+    #[schemars(default)]
+    pub redirect_uris: Vec<String>,
+    #[serde(default = "default_response_types")]
+    #[schemars(default = "default_response_types")]
+    pub response_types: Vec<String>,
+    #[serde(default = "default_pkce_required")]
+    #[schemars(default = "default_pkce_required")]
+    pub require_pkce: bool,
 }
 
 const fn default_enabled() -> bool {
@@ -47,6 +56,14 @@ fn empty_metadata() -> BTreeMap<String, Value> {
     BTreeMap::new()
 }
 
+fn default_response_types() -> Vec<String> {
+    vec!["token".to_string(), "code".to_string()]
+}
+
+const fn default_pkce_required() -> bool {
+    false
+}
+
 #[derive(Debug, Clone)]
 pub struct Client {
     pub client_id: String,
@@ -55,12 +72,30 @@ pub struct Client {
     pub allowed_scopes: BTreeSet<String>,
     pub metadata: BTreeMap<String, Value>,
     pub token_ttl_seconds: Option<u64>,
+    pub redirect_uris: BTreeSet<String>,
+    pub response_types: BTreeSet<String>,
+    pub require_pkce: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct UserConfig {
+    pub id: String,
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct User {
+    pub id: String,
+    pub username: String,
+    pub password: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct LoadedConfig {
     pub provider: ProviderSettings,
     pub clients: HashMap<String, Client>,
+    pub users: HashMap<String, User>,
     pub token_template: Value,
     pub config_root: PathBuf,
 }
@@ -76,6 +111,11 @@ impl LoadedConfig {
         if clients.is_empty() {
             return Err(AppError::Config("no active clients configured".into()));
         }
+        let users_vec: Vec<UserConfig> = read_json(root.join("users.json"))?;
+        let users = build_users(users_vec);
+        if users.is_empty() {
+            return Err(AppError::Config("no users configured".into()));
+        }
 
         let token_template: Value = read_json(root.join("token_template.json"))?;
         if !token_template.is_object() {
@@ -87,6 +127,7 @@ impl LoadedConfig {
         Ok(Self {
             provider,
             clients,
+            users,
             token_template,
             config_root: root.to_path_buf(),
         })
@@ -109,10 +150,29 @@ fn build_clients(clients: Vec<ClientConfig>) -> HashMap<String, Client> {
                 allowed_scopes: client.scopes.into_iter().collect(),
                 metadata: client.metadata,
                 token_ttl_seconds: client.token_ttl_seconds,
+                redirect_uris: client.redirect_uris.into_iter().collect(),
+                response_types: client.response_types.into_iter().collect(),
+                require_pkce: client.require_pkce,
             },
         );
     }
     map
+}
+
+fn build_users(users: Vec<UserConfig>) -> HashMap<String, User> {
+    users
+        .into_iter()
+        .map(|user| {
+            (
+                user.username.clone(),
+                User {
+                    id: user.id,
+                    username: user.username,
+                    password: user.password,
+                },
+            )
+        })
+        .collect()
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, AppError> {

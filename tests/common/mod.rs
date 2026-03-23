@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use axum::{
     Router,
     body::{Body, to_bytes},
-    http::{Request, StatusCode},
+    http::{Request, Response, StatusCode},
 };
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use pocket_oid::app::AppState;
@@ -84,4 +84,8 @@ pub fn verify_jwt_with_jwks(token: &str, jwks: &Value) -> Value {
     decode::<Value>(token, &decoding_key, &validation)
         .expect("token should validate")
         .claims
+}
+
+pub async fn request(app: Router, request: Request<Body>) -> Response<Body> {
+    app.oneshot(request).await.expect("request should succeed")
 }
