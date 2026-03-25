@@ -15,6 +15,7 @@ pub struct TokenTemplate {
 pub struct TokenContext<'a> {
     pub client: &'a Client,
     pub scope: Option<&'a str>,
+    pub subject: &'a str,
     pub issued_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub audience: Option<&'a str>,
@@ -88,6 +89,7 @@ fn extract_placeholder(value: &str) -> Option<String> {
 fn resolve_placeholder(name: &str, ctx: &TokenContext<'_>) -> Result<Value, AppError> {
     match name {
         "client_id" => Ok(Value::String(ctx.client.client_id.clone())),
+        "subject" => Ok(Value::String(ctx.subject.to_string())),
         "audience" => ctx
             .audience
             .map(|aud| Value::String(aud.to_string()))

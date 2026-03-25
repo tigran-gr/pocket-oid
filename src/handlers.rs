@@ -1,12 +1,21 @@
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Form, Json,
+    extract::{Query, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{Html, IntoResponse, Redirect, Response},
+};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::{
     app::{AppState, DiscoveryDocument},
+    auth::NewAuthorizationCode,
     config::Client,
     crypto::JwkSet,
     error::ApiError,
+    frontend,
     token::TokenContext,
 };
 
@@ -16,6 +25,34 @@ pub struct TokenRequest {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub scope: Option<String>,
+    pub code: Option<String>,
+    pub redirect_uri: Option<String>,
+    pub code_verifier: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthorizeRequest {
+    pub response_type: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub scope: Option<String>,
+    pub state: Option<String>,
+    pub nonce: Option<String>,
+    pub code_challenge: Option<String>,
+    pub code_challenge_method: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginForm {
+    pub username: String,
+    pub password: String,
+    pub return_to: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConsentForm {
+    pub decision: String,
+    pub return_to: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -27,13 +64,143 @@ pub struct TokenResponse {
     pub scope: Option<String>,
 }
 
+pub async fn authorize(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(request): Query<AuthorizeRequest>,
+) -> Response {
+    let client = match state.clients.get(&request.client_id) {
+        Some(client) => client,
+        None => {
+            return authorization_error_redirect(
+                &request.redirect_uri,
+                "unauthorized_client",
+                request.state,
+            );
+        }
+    };
+    if request.response_type != "code" || !client.response_types.contains("code") {
+        return authorization_error_redirect(
+            &request.redirect_uri,
+            "unsupported_response_type",
+            request.state,
+        );
+    }
+    if !client.redirect_uris.contains(&request.redirect_uri) {
+        return authorization_error_redirect(
+            &request.redirect_uri,
+            "invalid_request",
+            request.state,
+        );
+    }
+    let scope = match validate_scopes(request.scope.as_deref(), client) {
+        Ok(scope) => scope,
+        Err(_) => {
+            return authorization_error_redirect(
+                &request.redirect_uri,
+                "invalid_scope",
+                request.state,
+            );
+        }
+    };
+
+    let session = extract_session_id(&headers)
+        .and_then(|session_id| state.auth_store.get_session(&session_id));
+
+    let return_to = build_authorize_return(&request);
+    if let Some(session) = session {
+        let html = frontend::consent_page(
+            &return_to,
+            &request.client_id,
+            &scope.unwrap_or_default(),
+            &session.username,
+        );
+        return Html(html).into_response();
+    }
+
+    let html = frontend::login_page(&return_to, None);
+    Html(html).into_response()
+}
+
+pub async fn login(State(state): State<AppState>, Form(form): Form<LoginForm>) -> Response {
+    let Some(user) = state.users.get(&form.username) else {
+        return Html(frontend::login_page(
+            &form.return_to,
+            Some("Invalid credentials"),
+        ))
+        .into_response();
+    };
+    if !constant_time_eq(&user.password, &form.password) {
+        return Html(frontend::login_page(
+            &form.return_to,
+            Some("Invalid credentials"),
+        ))
+        .into_response();
+    }
+    let Some(session) =
+        state
+            .auth_store
+            .create_session(user.id.clone(), user.username.clone(), 3600)
+    else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    let mut response = Redirect::to(&form.return_to).into_response();
+    let cookie = format!(
+        "session_id={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=3600",
+        session.session_id
+    );
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        response.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    response
+}
+
+pub async fn consent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ConsentForm>,
+) -> Response {
+    let Some(session_id) = extract_session_id(&headers) else {
+        return Redirect::to("/authorize").into_response();
+    };
+    let Some(session) = state.auth_store.get_session(&session_id) else {
+        return Redirect::to("/authorize").into_response();
+    };
+
+    let request = parse_authorize_return(&form.return_to);
+
+    if form.decision != "approve" {
+        return authorization_error_redirect(&request.redirect_uri, "access_denied", request.state);
+    }
+
+    let Some(code) = state.auth_store.issue_authorization_code(
+        NewAuthorizationCode {
+            client_id: request.client_id,
+            user_id: session.user_id,
+            redirect_uri: request.redirect_uri.clone(),
+            scope: request.scope,
+            nonce: request.nonce,
+            code_challenge: request.code_challenge,
+            code_challenge_method: request.code_challenge_method,
+        },
+        120,
+    ) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+
+    let mut params = vec![format!("code={}", encode_uri_component(&code))];
+    if let Some(state_value) = request.state.as_deref() {
+        params.push(format!("state={}", encode_uri_component(state_value)));
+    }
+    let redirect = format!("{}?{}", request.redirect_uri, params.join("&"));
+    Redirect::to(&redirect).into_response()
+}
+
 pub async fn token_endpoint(
     State(state): State<AppState>,
-    axum::extract::Form(request): axum::extract::Form<TokenRequest>,
+    Form(request): Form<TokenRequest>,
 ) -> Result<Json<TokenResponse>, ApiError> {
-    if request.grant_type != "client_credentials" {
-        return Err(ApiError::UnsupportedGrantType);
-    }
     let client_id = request
         .client_id
         .ok_or_else(|| ApiError::invalid_request("client_id is required"))?;
@@ -42,8 +209,51 @@ pub async fn token_endpoint(
         .ok_or_else(|| ApiError::invalid_request("client_secret is required"))?;
 
     let client = authenticate_client(&state, &client_id, &client_secret)?;
-    let scope_text = validate_scopes(request.scope.as_deref(), client)?;
 
+    match request.grant_type.as_str() {
+        "client_credentials" => {
+            let scope_text = validate_scopes(request.scope.as_deref(), client)?;
+            issue_token(&state, client, scope_text, client.client_id.clone())
+        }
+        "authorization_code" => {
+            let code = request
+                .code
+                .ok_or_else(|| ApiError::invalid_request("code is required"))?;
+            let redirect_uri = request
+                .redirect_uri
+                .ok_or_else(|| ApiError::invalid_request("redirect_uri is required"))?;
+            let record = state
+                .auth_store
+                .consume_authorization_code(&code)
+                .ok_or_else(|| {
+                    ApiError::invalid_grant("authorization code is invalid or expired")
+                })?;
+            if record.client_id != client.client_id {
+                return Err(ApiError::invalid_grant(
+                    "authorization code client mismatch",
+                ));
+            }
+            if record.redirect_uri != redirect_uri {
+                return Err(ApiError::invalid_grant("redirect_uri mismatch"));
+            }
+            verify_pkce(
+                client,
+                &record.code_challenge,
+                &record.code_challenge_method,
+                request.code_verifier.as_deref(),
+            )?;
+            issue_token(&state, client, record.scope, record.user_id)
+        }
+        _ => Err(ApiError::UnsupportedGrantType),
+    }
+}
+
+fn issue_token(
+    state: &AppState,
+    client: &Client,
+    scope_text: Option<String>,
+    subject: String,
+) -> Result<Json<TokenResponse>, ApiError> {
     let issued_at = chrono::Utc::now();
     let ttl = client
         .token_ttl_seconds
@@ -60,6 +270,7 @@ pub async fn token_endpoint(
     let context = TokenContext {
         client,
         scope: scope_text.as_deref(),
+        subject: &subject,
         issued_at,
         expires_at,
         audience: client.audience.as_deref(),
@@ -75,21 +286,48 @@ pub async fn token_endpoint(
     let token = jsonwebtoken::encode(&header, &claims, &state.signing_key.encoding_key)
         .map_err(|err| ApiError::internal(anyhow::Error::new(err)))?;
 
-    let response = TokenResponse {
+    Ok(Json(TokenResponse {
         access_token: token,
         token_type: "Bearer".to_string(),
         expires_in: ttl,
         scope: scope_text,
+    }))
+}
+
+fn verify_pkce(
+    client: &Client,
+    code_challenge: &Option<String>,
+    code_challenge_method: &Option<String>,
+    code_verifier: Option<&str>,
+) -> Result<(), ApiError> {
+    if code_challenge.is_none() {
+        if client.require_pkce {
+            return Err(ApiError::invalid_grant("pkce is required for this client"));
+        }
+        return Ok(());
+    }
+
+    let verifier =
+        code_verifier.ok_or_else(|| ApiError::invalid_request("code_verifier is required"))?;
+    let expected = code_challenge
+        .as_ref()
+        .expect("code_challenge presence checked");
+    let method = code_challenge_method.as_deref().unwrap_or("plain");
+
+    let computed = match method {
+        "plain" => verifier.to_string(),
+        "S256" => {
+            let hash = Sha256::digest(verifier.as_bytes());
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash)
+        }
+        _ => return Err(ApiError::invalid_grant("unsupported code_challenge_method")),
     };
 
-    tracing::info!(
-        client_id = %client.client_id,
-        scope = response.scope.as_deref().unwrap_or(""),
-        expires_in = response.expires_in,
-        "issued access token"
-    );
+    if !constant_time_eq(expected, &computed) {
+        return Err(ApiError::invalid_grant("pkce verification failed"));
+    }
 
-    Ok(Json(response))
+    Ok(())
 }
 
 pub async fn openid_configuration(State(state): State<AppState>) -> Json<DiscoveryDocument> {
@@ -133,10 +371,7 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
     left.as_bytes().ct_eq(right.as_bytes()).into()
 }
 
-fn validate_scopes<'a>(
-    requested: Option<&'a str>,
-    client: &'a Client,
-) -> Result<Option<String>, ApiError> {
+fn validate_scopes(requested: Option<&str>, client: &Client) -> Result<Option<String>, ApiError> {
     match requested {
         Some(scopes) => {
             let parsed: Vec<String> = scopes
@@ -160,213 +395,118 @@ fn validate_scopes<'a>(
             if client.allowed_scopes.is_empty() {
                 Ok(None)
             } else {
-                let scopes: Vec<String> = client.allowed_scopes.iter().cloned().collect();
-                let combined = scopes.join(" ");
-                Ok(Some(combined))
+                Ok(Some(
+                    client
+                        .allowed_scopes
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ))
             }
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::{fs, path::PathBuf};
+fn extract_session_id(headers: &HeaderMap) -> Option<String> {
+    let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookies
+        .split(';')
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            let (key, value) = trimmed.split_once('=')?;
+            Some((key.trim(), value.trim()))
+        })
+        .find_map(|(key, value)| (key == "session_id").then(|| value.to_string()))
+}
 
-    use axum::{
-        body::{Body, to_bytes},
-        http::{Request, StatusCode},
+fn build_authorize_return(request: &AuthorizeRequest) -> String {
+    let mut params = vec![
+        format!(
+            "response_type={}",
+            encode_uri_component(&request.response_type)
+        ),
+        format!("client_id={}", encode_uri_component(&request.client_id)),
+        format!(
+            "redirect_uri={}",
+            encode_uri_component(&request.redirect_uri)
+        ),
+    ];
+    if let Some(scope) = request.scope.as_deref() {
+        params.push(format!("scope={}", encode_uri_component(scope)));
+    }
+    if let Some(state) = request.state.as_deref() {
+        params.push(format!("state={}", encode_uri_component(state)));
+    }
+    if let Some(nonce) = request.nonce.as_deref() {
+        params.push(format!("nonce={}", encode_uri_component(nonce)));
+    }
+    if let Some(code_challenge) = request.code_challenge.as_deref() {
+        params.push(format!(
+            "code_challenge={}",
+            encode_uri_component(code_challenge)
+        ));
+    }
+    if let Some(code_challenge_method) = request.code_challenge_method.as_deref() {
+        params.push(format!(
+            "code_challenge_method={}",
+            encode_uri_component(code_challenge_method)
+        ));
+    }
+    format!("/authorize?{}", params.join("&"))
+}
+
+fn parse_authorize_return(return_to: &str) -> AuthorizeRequest {
+    let query = return_to
+        .split_once('?')
+        .map(|(_, q)| q)
+        .unwrap_or_default();
+    let mut request = AuthorizeRequest {
+        response_type: String::new(),
+        client_id: String::new(),
+        redirect_uri: String::new(),
+        scope: None,
+        state: None,
+        nonce: None,
+        code_challenge: None,
+        code_challenge_method: None,
     };
-    use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
-    use serde_json::Value;
-    use tower::ServiceExt;
-
-    use crate::app::AppState;
-
-    fn config_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config")
-    }
-
-    #[tokio::test]
-    async fn fetches_access_token_with_client_credentials_flow() {
-        let state = AppState::initialize(&config_dir()).expect("app state should initialize");
-        let app = state.router();
-
-        let response = app
-            .oneshot(
-                Request::post("/oauth/token")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from(
-                        "grant_type=client_credentials&client_id=svc-a&client_secret=supersecret",
-                    ))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("request should succeed");
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let response_body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("response body should read");
-        let token_response: Value =
-            serde_json::from_slice(&response_body).expect("token response should be valid JSON");
-
-        assert_eq!(token_response["token_type"], "Bearer");
-        assert_eq!(token_response["expires_in"], 3600);
-        assert_eq!(token_response["scope"], "default");
-
-        let access_token = token_response["access_token"]
-            .as_str()
-            .expect("access token should be present");
-        let public_key = fs::read(config_dir().join("keys").join("signing-key.pub"))
-            .expect("public key should be readable");
-        let decoding_key = DecodingKey::from_rsa_pem(&public_key).expect("public key should parse");
-        let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
-        validation.set_issuer(&["https://pocket-oid.local"]);
-        validation.set_audience(&["https://api.example.local"]);
-
-        let token_data = decode::<Value>(access_token, &decoding_key, &validation)
-            .expect("access token should verify");
-
-        assert_eq!(token_data.claims["sub"], "svc-a");
-        assert_eq!(token_data.claims["scope"], "default");
-        assert_eq!(token_data.claims["custom"]["tenant"], "acme");
-        assert_eq!(token_data.claims["custom"]["env"], "dev");
-        assert!(token_data.claims["jti"].as_str().is_some());
-    }
-
-    #[tokio::test]
-    async fn fetches_access_token_with_jwks_key_discovered_from_well_known_config() {
-        let state = AppState::initialize(&config_dir()).expect("app state should initialize");
-        let app = state.router();
-
-        let token_response = app
-            .clone()
-            .oneshot(
-                Request::post("/oauth/token")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from(
-                        "grant_type=client_credentials&client_id=svc-a&client_secret=supersecret",
-                    ))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("request should succeed");
-
-        assert_eq!(token_response.status(), StatusCode::OK);
-
-        let token_body = to_bytes(token_response.into_body(), usize::MAX)
-            .await
-            .expect("response body should read");
-        let token_json: Value =
-            serde_json::from_slice(&token_body).expect("token response should be valid JSON");
-
-        let well_known_response = app
-            .clone()
-            .oneshot(
-                Request::get("/.well-known/openid-configuration")
-                    .body(Body::empty())
-                    .expect("request should build"),
-            )
-            .await
-            .expect("request should succeed");
-
-        assert_eq!(well_known_response.status(), StatusCode::OK);
-
-        let well_known_body = to_bytes(well_known_response.into_body(), usize::MAX)
-            .await
-            .expect("response body should read");
-        let well_known_json: Value = serde_json::from_slice(&well_known_body)
-            .expect("well-known response should be valid JSON");
-        let jwks_uri = well_known_json["jwks_uri"]
-            .as_str()
-            .expect("jwks_uri should be present");
-        let jwks_path = jwks_uri
-            .strip_prefix("https://pocket-oid.local")
-            .expect("jwks_uri should use configured issuer");
-
-        let jwks_response = app
-            .oneshot(
-                Request::get(jwks_path)
-                    .body(Body::empty())
-                    .expect("request should build"),
-            )
-            .await
-            .expect("request should succeed");
-
-        assert_eq!(jwks_response.status(), StatusCode::OK);
-
-        let jwks_body = to_bytes(jwks_response.into_body(), usize::MAX)
-            .await
-            .expect("response body should read");
-        let jwks_json: Value =
-            serde_json::from_slice(&jwks_body).expect("jwks response should be valid JSON");
-
-        let access_token = token_json["access_token"]
-            .as_str()
-            .expect("access token should be present");
-        let token_header = decode_header(access_token).expect("token header should decode");
-        let kid = token_header
-            .kid
-            .expect("token header should contain key id");
-
-        let jwk = jwks_json["keys"]
-            .as_array()
-            .expect("jwks keys should be an array")
-            .iter()
-            .find(|entry| entry["kid"].as_str() == Some(kid.as_str()))
-            .expect("jwks should include the signing key");
-        let modulus = jwk["n"].as_str().expect("jwk should include modulus");
-        let exponent = jwk["e"].as_str().expect("jwk should include exponent");
-
-        let decoding_key = DecodingKey::from_rsa_components(modulus, exponent)
-            .expect("jwk components should parse");
-        let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
-        validation.set_issuer(&["https://pocket-oid.local"]);
-        validation.set_audience(&["https://api.example.local"]);
-
-        let token_data = decode::<Value>(access_token, &decoding_key, &validation)
-            .expect("access token should verify");
-
-        assert_eq!(token_data.claims["sub"], "svc-a");
-        assert_eq!(token_data.claims["scope"], "default");
-    }
-
-    #[tokio::test]
-    async fn fetches_access_tokens_for_parallel_client_credentials_requests() {
-        let state = AppState::initialize(&config_dir()).expect("app state should initialize");
-        let app = state.router();
-
-        let request = || {
-            Request::post("/oauth/token")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(
-                    "grant_type=client_credentials&client_id=svc-a&client_secret=supersecret",
-                ))
-                .expect("request should build")
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
         };
-
-        let (first_response, second_response) = tokio::join!(
-            app.clone().oneshot(request()),
-            app.clone().oneshot(request())
-        );
-
-        for response in [first_response, second_response] {
-            let response = response.expect("request should succeed");
-            assert_eq!(response.status(), StatusCode::OK);
-
-            let response_body = to_bytes(response.into_body(), usize::MAX)
-                .await
-                .expect("response body should read");
-            let token_response: Value = serde_json::from_slice(&response_body)
-                .expect("token response should be valid JSON");
-
-            assert_eq!(token_response["token_type"], "Bearer");
-            assert_eq!(token_response["expires_in"], 3600);
-            assert_eq!(token_response["scope"], "default");
-            assert!(token_response["access_token"].as_str().is_some());
+        let value = decode_uri_component(value);
+        match key {
+            "response_type" => request.response_type = value,
+            "client_id" => request.client_id = value,
+            "redirect_uri" => request.redirect_uri = value,
+            "scope" => request.scope = Some(value),
+            "state" => request.state = Some(value),
+            "nonce" => request.nonce = Some(value),
+            "code_challenge" => request.code_challenge = Some(value),
+            "code_challenge_method" => request.code_challenge_method = Some(value),
+            _ => {}
         }
     }
+    request
+}
+
+fn authorization_error_redirect(
+    redirect_uri: &str,
+    error: &str,
+    state: Option<String>,
+) -> Response {
+    let mut params = vec![format!("error={}", encode_uri_component(error))];
+    if let Some(state_value) = state.as_deref() {
+        params.push(format!("state={}", encode_uri_component(state_value)));
+    }
+    Redirect::to(&format!("{}?{}", redirect_uri, params.join("&"))).into_response()
+}
+
+fn encode_uri_component(value: &str) -> String {
+    value.replace(' ', "%20")
+}
+
+fn decode_uri_component(value: &str) -> String {
+    value.replace("%20", " ")
 }

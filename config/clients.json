@@ -4,6 +4,8 @@
     "client_secret": "supersecret",
     "audience": "https://api.example.local",
     "scopes": ["default"],
+    "redirect_uris": ["https://app.example.local/callback"],
+    "response_types": ["code"],
     "metadata": {
       "tenant": "acme"
     }

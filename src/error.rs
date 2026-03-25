@@ -75,7 +75,10 @@ impl IntoResponse for ApiError {
             ApiError::UnsupportedGrantType => build_response(
                 StatusCode::BAD_REQUEST,
                 "unsupported_grant_type",
-                Some("only client_credentials is supported".to_string()),
+                Some(
+                    "supported grant types are client_credentials and authorization_code"
+                        .to_string(),
+                ),
             ),
             ApiError::Internal(err) => {
                 error!(error = ?err, "internal server error");

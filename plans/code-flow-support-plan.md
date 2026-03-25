@@ -1,137 +1,97 @@
-# Pocket-OID Authorization Code Flow Support Plan
+# Pocket-OID Authorization Code Flow Support Plan (Status Update)
 
 ## 1) Objective
-Add **Authorization Code Flow** support to Pocket-OID while preserving the current lightweight architecture and preparing for future OIDC features (PKCE hardening, consent, and refresh tokens).
+Add **Authorization Code Flow** support to Pocket-OID while preserving the current lightweight architecture and preparing for future OIDC features (PKCE hardening, consent hardening, and persistent storage).
 
-## 2) Recommended all-Rust stack
-If we want a mostly/all-Rust stack end-to-end, the strongest fit is:
+## 2) Current implementation status (as of March 22, 2026)
 
-- **Backend**: Axum + Tokio (already aligned with current direction).
-- **Frontend**: **Leptos** (recommended) for SSR/hydration options, good ecosystem momentum, and straightforward Rust-first full-stack workflows.
-- **Alternative frontend choices**:
-  - **Yew**: mature component model, good if you prefer CSR-first architecture.
-  - **Dioxus**: ergonomic and multi-target (web/desktop), useful if desktop admin tooling may be needed later.
+### ✅ Implemented
+- Config schema additions for code flow clients:
+  - `redirect_uris`
+  - `response_types`
+  - `require_pkce`
+- In-memory users loaded from `users.json`.
+- In-memory auth/session storage using `RwLock<HashMap<...>>`.
+- New endpoints:
+  - `GET /authorize`
+  - `POST /login`
+  - `POST /consent`
+- `POST /oauth/token` support for `grant_type=authorization_code` with:
+  - client authentication
+  - redirect URI binding
+  - one-time code invalidation
+  - PKCE verification when present/required
+- Discovery metadata updated for:
+  - `grant_types_supported` includes `authorization_code`
+  - `response_types_supported` includes `code`
+- Basic Rust-rendered login and consent pages.
+- Integration coverage for happy-path end-to-end auth code flow.
 
-### Why Leptos is my recommendation
-- Rust-first components and routing.
-- Flexible rendering model (SSR/CSR) for login/consent pages.
-- Works well when minimizing JS/TS footprint is a goal.
+### ⚠️ Partially implemented / caveats
+- Session cookie is `HttpOnly` and `SameSite=Lax`, but not yet `Secure` (suitable for local dev, needs production hardening).
+- PKCE is supported, but no dedicated feature-flag gating yet.
+- Consent exists, but no durable audit trail.
 
-## 3) Scope for first code-flow milestone
-Implement minimal, standards-aligned code flow for confidential clients:
-
-- `/authorize` endpoint (GET): validates request, authenticates user session, generates short-lived auth code, redirects with `code`.
-- `/oauth/token` extension (POST): supports `grant_type=authorization_code` in addition to existing client credentials.
-- Basic login UI and consent UI in Rust frontend.
-- In-memory storage for authorization codes and user sessions for MVP.
-- Optional PKCE support as feature flag in milestone 1; mandatory in milestone 2.
-
-## 4) Architecture changes
-
-### 4.1 Domain model additions
-- `User` (id, username, password hash or external auth reference).
-- `AuthorizationRequest` (client_id, redirect_uri, scope, state, nonce, code_challenge*, code_challenge_method*).
-- `AuthorizationCodeRecord` (code, client_id, user_id, redirect_uri, scope, nonce, expiration, code_challenge*).
-- `Session` (session_id, user_id, auth_time, ttl).
-
-### 4.2 Storage strategy
-- **MVP**: in-memory stores (`DashMap`/`RwLock<HashMap<...>>`) with expiration cleanup.
-- **Next**: move codes/sessions/users to SQLite/Postgres behind repository traits.
-
-### 4.3 Endpoint additions
-- `GET /authorize`
-- `POST /login` (or integrated auth callback)
-- `GET /consent`
-- `POST /consent`
-- Existing `POST /oauth/token` to add auth code exchange branch.
-
-## 5) Detailed implementation phases
-
-### Phase A — Protocol foundations
-1. Extend config schema with:
-   - allowed `redirect_uris`
-   - allowed `response_types` (`code`)
-   - optional PKCE requirement flag per client
-2. Add request validation utilities:
-   - redirect URI exact matching
-   - scope parsing/validation
-   - state + nonce handling
-3. Define RFC-compliant error helpers for authorization endpoint redirects.
-
-### Phase B — User auth and sessions
-1. Add minimal user auth provider:
-   - local static users config or trait-based auth adapter
-2. Implement signed secure cookies for sessions.
-3. Add login/logout handlers and middleware to enforce authenticated session on `/authorize`.
-
-### Phase C — Authorization endpoint and consent
-1. `/authorize` validates client and parameters.
-2. If no session, redirect to login and resume flow.
-3. Show consent screen with requested scopes.
-4. On approval, mint one-time authorization code (short TTL, e.g., 60–120s).
-5. Redirect to `redirect_uri?code=...&state=...`.
-
-### Phase D — Token exchange
-1. Extend `/oauth/token`:
-   - validate client auth
-   - verify code ownership + redirect URI binding
-   - verify PKCE when present/required
-   - single-use code invalidation
-2. Issue access token using existing template pipeline, plus:
-   - `sub` from authenticated user
-   - `amr`/`auth_time` optional claims
-3. Return standard token response and errors.
-
-### Phase E — Hardening and compliance
-1. Enforce strict redirect URI and short code TTL.
-2. Add replay protections and auditable events.
-3. Add brute-force/rate limits for login and token endpoints.
-4. Add issuer/audience/nonce validations where relevant.
-
-### Phase F — Frontend integration (Leptos)
-1. Build Rust login + consent pages in Leptos.
-2. Keep UX minimal: login form, scope list, approve/deny actions.
-3. Integrate server-side validation errors and OIDC error redirects.
-4. Add accessibility baseline (labels, keyboard nav, focus management).
-
-## 6) Testing plan
-
-- **Unit tests**:
-  - authorize request validation
-  - redirect URI checker
-  - code creation/expiry/single-use semantics
-  - PKCE verifier logic
-- **Integration tests**:
-  - happy-path auth code flow end-to-end
-  - invalid redirect URI rejection
-  - expired/used code rejection
-  - bad client credential at token exchange
+### ❌ Not yet implemented
+- Leptos-based UI (current pages are server-rendered Rust HTML, not Leptos SSR/hydration).
+- `GET /consent` route (consent is currently rendered from `/authorize`, submission via `POST /consent`).
+- Login/logout middleware and explicit logout endpoint.
+- Rate limiting / brute-force protection.
+- Durable persistence layer (SQLite/Postgres + repository traits).
+- Expanded negative-path tests called out in the original plan:
+  - invalid redirect URI rejection path
+  - expired/used code rejection path
   - consent denied path
-- **Security checks**:
-  - cookie flags (`HttpOnly`, `Secure`, `SameSite`)
-  - state echo correctness
-  - no open redirect behavior
+  - broader auth-code token error-path matrix
+- Dedicated unit tests for validators/store PKCE helpers.
+- Feature flag rollout (`auth_code_flow`) and staged deployment workflow.
 
-## 7) Rollout strategy
+## 3) Architecture snapshot
 
-1. Ship behind feature flag: `auth_code_flow`.
-2. Internal testing with one trusted client app.
-3. Enable PKCE-required mode for public clients.
-4. Promote from in-memory stores to durable DB.
+### Domain model in code now
+- `User` (`id`, `username`, `password`) in config/runtime memory.
+- `Session` (`session_id`, `user_id`, `username`, `auth_time`, `expires_at`).
+- `AuthorizationCodeRecord` (`code`, `client_id`, `user_id`, `redirect_uri`, `scope`, `nonce`, `expires_at`, PKCE fields).
 
-## 8) Deliverables checklist
+### Storage strategy
+- **Now**: in-memory stores with opportunistic expiration cleanup on read/consume.
+- **Next**: move users/sessions/codes to persistent DB abstractions.
 
-- [ ] Config schema updates for code flow clients.
-- [ ] `/authorize`, login, consent endpoints.
-- [ ] `/oauth/token` auth code grant support.
-- [ ] Authorization code store with TTL + one-time usage.
-- [ ] Session management.
+## 4) Remaining execution plan
+
+### Phase 1 — Correctness and compliance completion
+1. Add missing auth-code negative integration tests (invalid redirect, denied consent, code replay/expiry).
+2. Add unit tests for PKCE verifier and authorization return parsing helpers.
+3. Improve redirect/error handling completeness for authorization endpoint edge cases.
+
+### Phase 2 — Security hardening
+1. Enforce `Secure` cookies in TLS deployments.
+2. Add login/token rate limits and basic lockout policy.
+3. Add auditable events for login, consent, and code/token exchange.
+4. Validate nonce/state handling more strictly where applicable.
+
+### Phase 3 — Frontend and productization
+1. Replace Rust string-based pages with **Leptos** login/consent UI.
+2. Improve accessibility and form error UX.
+3. Introduce `auth_code_flow` feature flag and rollout toggles.
+
+### Phase 4 — Persistence
+1. Introduce repository traits.
+2. Implement SQLite/Postgres backends for users/sessions/codes.
+3. Preserve one-time code semantics and TTL behavior with DB constraints/indexes.
+
+## 5) Deliverables checklist (updated)
+
+- [x] Config schema updates for code flow clients.
+- [x] `/authorize`, login, consent endpoints.
+- [x] `/oauth/token` auth code grant support.
+- [x] Authorization code store with TTL + one-time usage.
+- [x] Session management.
 - [ ] Leptos-based login/consent UI.
-- [ ] Unit + integration test coverage.
-- [ ] Updated discovery metadata (`response_types_supported`, `grant_types_supported`).
+- [~] Unit + integration test coverage (happy path complete; several negative paths/unit cases pending).
+- [x] Updated discovery metadata (`response_types_supported`, `grant_types_supported`).
 
-## 9) Suggested timeline (small team)
-
-- Week 1: Phase A + B
-- Week 2: Phase C + D
-- Week 3: Phase E + F + testing and docs
+## 6) Suggested near-term timeline (small team)
+- Week 1: Finish test matrix + security hardening baseline.
+- Week 2: Leptos UI migration and accessibility pass.
+- Week 3: Feature flag rollout + persistence abstraction spike.
