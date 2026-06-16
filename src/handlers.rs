@@ -124,13 +124,14 @@ pub async fn authorize(
         return Html(html).into_response();
     }
 
-    let html = frontend::login_page(&return_to, None);
+    let html = frontend::login_page(&state.provider.name, &return_to, None);
     Html(html).into_response()
 }
 
 pub async fn login(State(state): State<AppState>, Form(form): Form<LoginForm>) -> Response {
     let Some(user) = state.users.get(&form.username) else {
         return Html(frontend::login_page(
+            &state.provider.name,
             &form.return_to,
             Some("Invalid credentials"),
         ))
@@ -138,6 +139,7 @@ pub async fn login(State(state): State<AppState>, Form(form): Form<LoginForm>) -
     };
     if !user.verify_password(&form.password) {
         return Html(frontend::login_page(
+            &state.provider.name,
             &form.return_to,
             Some("Invalid credentials"),
         ))

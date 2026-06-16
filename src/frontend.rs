@@ -13,7 +13,8 @@ fn escape_html(value: &str) -> String {
     escaped
 }
 
-pub fn login_page(return_to: &str, error: Option<&str>) -> String {
+pub fn login_page(provider_name: &str, return_to: &str, error: Option<&str>) -> String {
+    let escaped_provider_name = escape_html(provider_name);
     let escaped_return_to = escape_html(return_to);
     let error_html = error
         .map(|message| {
@@ -29,7 +30,7 @@ pub fn login_page(return_to: &str, error: Option<&str>) -> String {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Pocket-OID Login</title>
+    <title>{escaped_provider_name} Login</title>
     <style>
       :root {{
         color-scheme: light;
@@ -224,13 +225,13 @@ pub fn login_page(return_to: &str, error: Option<&str>) -> String {
   <body>
     <main class="auth-page">
       <section class="auth-shell" aria-labelledby="login-title">
-        <div class="brand" aria-label="Pocket-OID">
-          <p class="brand-name">Pocket-OID</p>
+        <div class="brand" aria-label="{escaped_provider_name}">
+          <p class="brand-name">{escaped_provider_name}</p>
           <p class="brand-subtitle">OpenID Connect Provider</p>
         </div>
         <div class="auth-panel">
           <h1 id="login-title">Sign in to your account</h1>
-          <p class="intro">Access your OpenID Connect provider.</p>
+          <p class="intro">Access {escaped_provider_name}.</p>
           {error_html}
           <form method="post" action="/login">
             <input type="hidden" name="return_to" value="{escaped_return_to}" />
@@ -295,10 +296,12 @@ mod tests {
 
     #[test]
     fn login_page_renders_post_form_markup() {
-        let html = login_page("/authorize?response_type=code", None);
+        let html = login_page("Pocket-OID", "/authorize?response_type=code", None);
 
         assert!(html.contains(r#"<form method="post" action="/login">"#));
         assert!(html.contains(r#"name="return_to""#));
+        assert!(html.contains(r#"<p class="brand-name">Pocket-OID</p>"#));
+        assert!(html.contains("Access Pocket-OID."));
         assert!(!html.contains(r#"\""#));
     }
 

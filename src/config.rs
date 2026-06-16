@@ -15,6 +15,7 @@ use crate::error::AppError;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ProviderSettings {
+    pub name: String,
     pub issuer: String,
     pub token_ttl_seconds: u64,
     pub listen: String,

@@ -72,6 +72,11 @@ async fn completes_authorization_code_flow() {
     )
     .await;
     assert_eq!(authorize.status(), StatusCode::OK);
+    let body = to_bytes(authorize.into_body(), usize::MAX)
+        .await
+        .expect("response body should read");
+    let html = String::from_utf8(body.to_vec()).expect("login page should be utf-8");
+    assert!(html.contains(r#"<p class="brand-name">Pocket-OID</p>"#));
 
     let login = request(
         app.clone(),
