@@ -1,7 +1,10 @@
-[
-  {
-    "id": "user-alice",
-    "username": "alice",
-    "password_plain": "password123"
-  }
-]
+{
+  "provider": "file",
+  "users": [
+    {
+      "id": "user-alice",
+      "username": "alice",
+      "password_plain": "password123"
+    }
+  ]
+}

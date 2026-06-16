@@ -1,7 +1,10 @@
-[
-  {
-    "id": "user-alice",
-    "username": "alice",
-    "password_hash": "sha256:ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f"
-  }
-]
+{
+  "provider": "file",
+  "users": [
+    {
+      "id": "user-alice",
+      "username": "alice",
+      "password_hash": "sha256:ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f"
+    }
+  ]
+}

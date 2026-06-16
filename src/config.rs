@@ -80,6 +80,14 @@ pub struct Client {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct UsersConfig {
+    pub provider: String,
+    #[serde(default)]
+    #[schemars(default)]
+    pub users: Vec<UserConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct UserConfig {
     pub id: String,
     pub username: String,
@@ -133,8 +141,8 @@ impl LoadedConfig {
         if clients.is_empty() {
             return Err(AppError::Config("no active clients configured".into()));
         }
-        let users_vec: Vec<UserConfig> = read_json(root.join("users.json"))?;
-        let users = build_users(users_vec)?;
+        let users_config: UsersConfig = read_json(root.join("users.json"))?;
+        let users = build_users_from_config(users_config)?;
         if users.is_empty() {
             return Err(AppError::Config("no users configured".into()));
         }
@@ -196,6 +204,16 @@ fn build_users(users: Vec<UserConfig>) -> Result<HashMap<String, User>, AppError
             ))
         })
         .collect()
+}
+
+fn build_users_from_config(config: UsersConfig) -> Result<HashMap<String, User>, AppError> {
+    if config.provider != "file" {
+        return Err(AppError::Config(format!(
+            "unsupported users provider '{}'; supported providers: file",
+            config.provider
+        )));
+    }
+    build_users(config.users)
 }
 
 fn user_credential(user: &UserConfig) -> Result<PasswordCredential, AppError> {
@@ -273,7 +291,7 @@ fn validate_json(schema: &schemars::schema::RootSchema, value: &Value) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{UserConfig, build_users};
+    use super::{UserConfig, UsersConfig, build_users, build_users_from_config};
 
     #[test]
     fn builds_user_with_sha256_password_hash() {
@@ -309,16 +327,49 @@ mod tests {
 
     #[test]
     fn rejects_legacy_password_key_without_new_password_fields() {
-        let users: Vec<UserConfig> = serde_json::from_str(
-            r#"[{"id":"user-alice","username":"alice","password":"password123"}]"#,
+        let config: UsersConfig = serde_json::from_str(
+            r#"{
+                "provider": "file",
+                "users": [
+                    {"id":"user-alice","username":"alice","password":"password123"}
+                ]
+            }"#,
         )
         .expect("legacy json should deserialize with unknown password ignored");
 
-        let error = build_users(users).expect_err("legacy password key should be rejected");
+        let error =
+            build_users_from_config(config).expect_err("legacy password key should be rejected");
         assert!(
             error
                 .to_string()
                 .contains("must set password_hash or password_plain")
         );
+    }
+
+    #[test]
+    fn builds_users_from_file_provider_config() {
+        let users = build_users_from_config(UsersConfig {
+            provider: "file".to_string(),
+            users: vec![UserConfig {
+                id: "user-alice".to_string(),
+                username: "alice".to_string(),
+                password_hash: None,
+                password_plain: Some("password123".to_string()),
+            }],
+        })
+        .expect("file provider user config should build");
+
+        assert!(users.contains_key("alice"));
+    }
+
+    #[test]
+    fn rejects_unsupported_users_provider() {
+        let error = build_users_from_config(UsersConfig {
+            provider: "postgres".to_string(),
+            users: Vec::new(),
+        })
+        .expect_err("unsupported provider should be rejected");
+
+        assert!(error.to_string().contains("unsupported users provider"));
     }
 }
