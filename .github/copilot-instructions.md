@@ -102,6 +102,10 @@ Test/layout files:
 - `tests/integration/*.rs`: discovery, health, token success, parallel request, and OAuth error-path coverage.
 - `tests_blackbox/test_server_blackbox.py`: launches `cargo run --quiet`, rewrites copied fixture config to a free port, and verifies both successful startup and expected startup failure.
 
+## UI design notes
+
+The login page in `src/frontend.rs` should stay modern, practical, and minimal. It is a server-rendered auth surface centered around a compact white panel, teal accents, clear labels, accessible error messaging, and responsive spacing. Preserve the existing form behavior (`POST /login`, hidden `return_to`, username/password autocomplete) and keep the visual language restrained rather than marketing-heavy.
+
 Repository notes that save time:
 - `README.md` is only a one-line summary; most useful repo knowledge is in the code.
 - `plans/` and `provider-plan.md` are forward-looking planning docs, not the current source of truth. They mention proposed CI and future authorization-code-flow work; do not assume either exists in the current implementation.
