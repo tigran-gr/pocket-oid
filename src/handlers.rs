@@ -84,25 +84,18 @@ pub async fn authorize(
 ) -> Response {
     let client = match state.clients.get(&request.client_id) {
         Some(client) => client,
-        None => {
-            return authorization_error_redirect(
-                &request.redirect_uri,
-                "unauthorized_client",
-                request.state,
-            );
-        }
+        None => return authorization_error_response("unauthorized_client", None),
     };
+    if !client.redirect_uris.contains(&request.redirect_uri) {
+        return authorization_error_response(
+            "invalid_request",
+            Some("redirect_uri is not registered for client"),
+        );
+    }
     if request.response_type != "code" || !client.response_types.contains("code") {
         return authorization_error_redirect(
             &request.redirect_uri,
             "unsupported_response_type",
-            request.state,
-        );
-    }
-    if !client.redirect_uris.contains(&request.redirect_uri) {
-        return authorization_error_redirect(
-            &request.redirect_uri,
-            "invalid_request",
             request.state,
         );
     }
@@ -575,6 +568,24 @@ fn authorization_error_redirect(
         params.push(format!("state={}", encode_uri_component(state_value)));
     }
     Redirect::to(&format!("{}?{}", redirect_uri, params.join("&"))).into_response()
+}
+
+fn authorization_error_response(error: &str, description: Option<&str>) -> Response {
+    #[derive(Serialize)]
+    struct ErrorBody<'a> {
+        error: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_description: Option<&'a str>,
+    }
+
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorBody {
+            error,
+            error_description: description,
+        }),
+    )
+        .into_response()
 }
 
 fn encode_uri_component(value: &str) -> String {

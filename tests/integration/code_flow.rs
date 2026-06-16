@@ -150,6 +150,60 @@ async fn completes_authorization_code_flow() {
 }
 
 #[tokio::test]
+async fn invalid_authorize_redirect_uri_returns_local_error() {
+    let app = test_app("config-basic");
+    let authorize_path = build_authorize_path(
+        "svc-a",
+        "https://attacker.example.local/callback",
+        "default",
+        Some("abc"),
+        None,
+    );
+
+    let response = request(
+        app,
+        Request::get(&authorize_path)
+            .body(Body::empty())
+            .expect("request should build"),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response.headers().get(header::LOCATION).is_none());
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body should read");
+    let json: Value = serde_json::from_slice(&body).expect("json should parse");
+    assert_eq!(json["error"], "invalid_request");
+    assert_eq!(
+        json["error_description"],
+        "redirect_uri is not registered for client"
+    );
+}
+
+#[tokio::test]
+async fn invalid_authorize_redirect_uri_is_rejected_before_other_redirectable_errors() {
+    let app = test_app("config-basic");
+    let authorize_path = "/authorize?response_type=token&client_id=svc-a&redirect_uri=https://attacker.example.local/callback&scope=default";
+
+    let response = request(
+        app,
+        Request::get(authorize_path)
+            .body(Body::empty())
+            .expect("request should build"),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response.headers().get(header::LOCATION).is_none());
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body should read");
+    let json: Value = serde_json::from_slice(&body).expect("json should parse");
+    assert_eq!(json["error"], "invalid_request");
+}
+
+#[tokio::test]
 async fn completes_code_flow_with_loopback_listener_and_id_token_verification() {
     let listener = LoopbackListener::start().await;
     let redirect_uri = listener.redirect_uri();
