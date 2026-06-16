@@ -143,7 +143,7 @@ pub async fn login(State(state): State<AppState>, Form(form): Form<LoginForm>) -
         ))
         .into_response();
     };
-    if !constant_time_eq(&user.password, &form.password) {
+    if !user.verify_password(&form.password) {
         return Html(frontend::login_page(
             &form.return_to,
             Some("Invalid credentials"),

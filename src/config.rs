@@ -8,6 +8,8 @@ use jsonschema::JSONSchema;
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use crate::error::AppError;
 
@@ -81,14 +83,34 @@ pub struct Client {
 pub struct UserConfig {
     pub id: String,
     pub username: String,
-    pub password: String,
+    #[serde(default)]
+    #[schemars(default)]
+    pub password_hash: Option<String>,
+    #[serde(default)]
+    #[schemars(default)]
+    pub password_plain: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct User {
     pub id: String,
     pub username: String,
-    pub password: String,
+    credential: PasswordCredential,
+}
+
+#[derive(Debug, Clone)]
+enum PasswordCredential {
+    Sha256 { hex: String },
+    Plain { value: String },
+}
+
+impl User {
+    pub fn verify_password(&self, password: &str) -> bool {
+        match &self.credential {
+            PasswordCredential::Sha256 { hex } => constant_time_eq(hex, &sha256_hex(password)),
+            PasswordCredential::Plain { value } => constant_time_eq(value, password),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -112,7 +134,7 @@ impl LoadedConfig {
             return Err(AppError::Config("no active clients configured".into()));
         }
         let users_vec: Vec<UserConfig> = read_json(root.join("users.json"))?;
-        let users = build_users(users_vec);
+        let users = build_users(users_vec)?;
         if users.is_empty() {
             return Err(AppError::Config("no users configured".into()));
         }
@@ -159,20 +181,69 @@ fn build_clients(clients: Vec<ClientConfig>) -> HashMap<String, Client> {
     map
 }
 
-fn build_users(users: Vec<UserConfig>) -> HashMap<String, User> {
+fn build_users(users: Vec<UserConfig>) -> Result<HashMap<String, User>, AppError> {
     users
         .into_iter()
         .map(|user| {
-            (
+            let credential = user_credential(&user)?;
+            Ok((
                 user.username.clone(),
                 User {
                     id: user.id,
                     username: user.username,
-                    password: user.password,
+                    credential,
                 },
-            )
+            ))
         })
         .collect()
+}
+
+fn user_credential(user: &UserConfig) -> Result<PasswordCredential, AppError> {
+    match (&user.password_hash, &user.password_plain) {
+        (Some(_), Some(_)) => Err(AppError::Config(format!(
+            "user '{}' must set only one of password_hash or password_plain",
+            user.username
+        ))),
+        (Some(hash), None) => parse_password_hash(&user.username, hash),
+        (None, Some(password)) => Ok(PasswordCredential::Plain {
+            value: password.clone(),
+        }),
+        (None, None) => Err(AppError::Config(format!(
+            "user '{}' must set password_hash or password_plain",
+            user.username
+        ))),
+    }
+}
+
+fn parse_password_hash(username: &str, hash: &str) -> Result<PasswordCredential, AppError> {
+    let Some(hex) = hash.strip_prefix("sha256:") else {
+        return Err(AppError::Config(format!(
+            "user '{username}' password_hash must use sha256:<hex>"
+        )));
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AppError::Config(format!(
+            "user '{username}' password_hash must contain a 64-character sha256 hex digest"
+        )));
+    }
+    Ok(PasswordCredential::Sha256 {
+        hex: hex.to_ascii_lowercase(),
+    })
+}
+
+fn sha256_hex(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes().ct_eq(right.as_bytes()).into()
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, AppError> {
@@ -198,4 +269,56 @@ fn validate_json(schema: &schemars::schema::RootSchema, value: &Value) -> Result
         return Err(AppError::Schema(joined));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UserConfig, build_users};
+
+    #[test]
+    fn builds_user_with_sha256_password_hash() {
+        let users = build_users(vec![UserConfig {
+            id: "user-alice".to_string(),
+            username: "alice".to_string(),
+            password_hash: Some(
+                "sha256:ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f"
+                    .to_string(),
+            ),
+            password_plain: None,
+        }])
+        .expect("user config should build");
+
+        let user = users.get("alice").expect("user should exist");
+        assert!(user.verify_password("password123"));
+        assert!(!user.verify_password("wrong-password"));
+    }
+
+    #[test]
+    fn builds_user_with_test_plain_password() {
+        let users = build_users(vec![UserConfig {
+            id: "user-alice".to_string(),
+            username: "alice".to_string(),
+            password_hash: None,
+            password_plain: Some("password123".to_string()),
+        }])
+        .expect("user config should build");
+
+        let user = users.get("alice").expect("user should exist");
+        assert!(user.verify_password("password123"));
+    }
+
+    #[test]
+    fn rejects_legacy_password_key_without_new_password_fields() {
+        let users: Vec<UserConfig> = serde_json::from_str(
+            r#"[{"id":"user-alice","username":"alice","password":"password123"}]"#,
+        )
+        .expect("legacy json should deserialize with unknown password ignored");
+
+        let error = build_users(users).expect_err("legacy password key should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("must set password_hash or password_plain")
+        );
+    }
 }

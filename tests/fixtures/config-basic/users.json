@@ -2,6 +2,6 @@
   {
     "id": "user-alice",
     "username": "alice",
-    "password": "password123"
+    "password_plain": "password123"
   }
 ]
