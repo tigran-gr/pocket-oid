@@ -61,7 +61,20 @@ pub struct TokenResponse {
     pub token_type: String,
     pub expires_in: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct IdTokenClaims<'a> {
+    iss: &'a str,
+    sub: &'a str,
+    aud: &'a str,
+    iat: i64,
+    exp: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<&'a str>,
 }
 
 pub async fn authorize(
@@ -213,7 +226,14 @@ pub async fn token_endpoint(
     match request.grant_type.as_str() {
         "client_credentials" => {
             let scope_text = validate_scopes(request.scope.as_deref(), client)?;
-            issue_token(&state, client, scope_text, client.client_id.clone())
+            issue_token(
+                &state,
+                client,
+                scope_text,
+                client.client_id.clone(),
+                None,
+                false,
+            )
         }
         "authorization_code" => {
             let code = request
@@ -242,7 +262,16 @@ pub async fn token_endpoint(
                 &record.code_challenge_method,
                 request.code_verifier.as_deref(),
             )?;
-            issue_token(&state, client, record.scope, record.user_id)
+            let scope_text = record.scope;
+            let issue_id_token = scope_includes_openid(scope_text.as_deref());
+            issue_token(
+                &state,
+                client,
+                scope_text,
+                record.user_id,
+                record.nonce,
+                issue_id_token,
+            )
         }
         _ => Err(ApiError::UnsupportedGrantType),
     }
@@ -253,6 +282,8 @@ fn issue_token(
     client: &Client,
     scope_text: Option<String>,
     subject: String,
+    nonce: Option<String>,
+    include_id_token: bool,
 ) -> Result<Json<TokenResponse>, ApiError> {
     let issued_at = chrono::Utc::now();
     let ttl = client
@@ -282,16 +313,52 @@ fn issue_token(
         .render(&context)
         .map_err(|err| ApiError::internal(anyhow::Error::new(err)))?;
 
-    let header = state.signing_key.header();
-    let token = jsonwebtoken::encode(&header, &claims, &state.signing_key.encoding_key)
-        .map_err(|err| ApiError::internal(anyhow::Error::new(err)))?;
+    let access_token = sign_token(state, &claims)?;
+    let id_token = if include_id_token {
+        Some(build_id_token(
+            state,
+            client,
+            &subject,
+            nonce.as_deref(),
+            issued_at,
+            expires_at,
+        )?)
+    } else {
+        None
+    };
 
     Ok(Json(TokenResponse {
-        access_token: token,
+        access_token,
         token_type: "Bearer".to_string(),
         expires_in: ttl,
+        id_token,
         scope: scope_text,
     }))
+}
+
+fn build_id_token(
+    state: &AppState,
+    client: &Client,
+    subject: &str,
+    nonce: Option<&str>,
+    issued_at: chrono::DateTime<chrono::Utc>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> Result<String, ApiError> {
+    let claims = IdTokenClaims {
+        iss: state.provider.issuer.as_str(),
+        sub: subject,
+        aud: client.client_id.as_str(),
+        iat: issued_at.timestamp(),
+        exp: expires_at.timestamp(),
+        nonce,
+    };
+    sign_token(state, &claims)
+}
+
+fn sign_token<T: Serialize>(state: &AppState, claims: &T) -> Result<String, ApiError> {
+    let header = state.signing_key.header();
+    jsonwebtoken::encode(&header, claims, &state.signing_key.encoding_key)
+        .map_err(|err| ApiError::internal(anyhow::Error::new(err)))
 }
 
 fn verify_pkce(
@@ -406,6 +473,13 @@ fn validate_scopes(requested: Option<&str>, client: &Client) -> Result<Option<St
             }
         }
     }
+}
+
+fn scope_includes_openid(scope_text: Option<&str>) -> bool {
+    scope_text
+        .into_iter()
+        .flat_map(str::split_whitespace)
+        .any(|scope| scope == "openid")
 }
 
 fn extract_session_id(headers: &HeaderMap) -> Option<String> {

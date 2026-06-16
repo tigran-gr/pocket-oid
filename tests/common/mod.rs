@@ -61,6 +61,15 @@ pub async fn get_json(app: Router, path: &str) -> (StatusCode, Value) {
 }
 
 pub fn verify_jwt_with_jwks(token: &str, jwks: &Value) -> Value {
+    verify_jwt_with_jwks_for(
+        token,
+        jwks,
+        "https://pocket-oid.local",
+        "https://api.example.local",
+    )
+}
+
+pub fn verify_jwt_with_jwks_for(token: &str, jwks: &Value, issuer: &str, audience: &str) -> Value {
     let header = decode_header(token).expect("header should decode");
     let kid = header.kid.expect("kid should be present");
 
@@ -78,8 +87,8 @@ pub fn verify_jwt_with_jwks(token: &str, jwks: &Value) -> Value {
         DecodingKey::from_rsa_components(modulus, exponent).expect("jwk should parse");
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
-    validation.set_issuer(&["https://pocket-oid.local"]);
-    validation.set_audience(&["https://api.example.local"]);
+    validation.set_issuer(&[issuer]);
+    validation.set_audience(&[audience]);
 
     decode::<Value>(token, &decoding_key, &validation)
         .expect("token should validate")
