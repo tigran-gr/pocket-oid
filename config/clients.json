@@ -6,6 +6,7 @@
     "scopes": ["default"],
     "redirect_uris": ["https://app.example.local/callback"],
     "response_types": ["code"],
+    "consent_mode": "always",
     "metadata": {
       "tenant": "acme"
     }

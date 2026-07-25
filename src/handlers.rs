@@ -12,7 +12,7 @@ use subtle::ConstantTimeEq;
 use crate::{
     app::{AppState, DiscoveryDocument},
     auth::NewAuthorizationCode,
-    config::Client,
+    config::{Client, ConsentMode},
     crypto::JwkSet,
     error::ApiError,
     frontend,
@@ -82,32 +82,9 @@ pub async fn authorize(
     headers: HeaderMap,
     Query(request): Query<AuthorizeRequest>,
 ) -> Response {
-    let client = match state.clients.get(&request.client_id) {
-        Some(client) => client,
-        None => return authorization_error_response("unauthorized_client", None),
-    };
-    if !client.redirect_uris.contains(&request.redirect_uri) {
-        return authorization_error_response(
-            "invalid_request",
-            Some("redirect_uri is not registered for client"),
-        );
-    }
-    if request.response_type != "code" || !client.response_types.contains("code") {
-        return authorization_error_redirect(
-            &request.redirect_uri,
-            "unsupported_response_type",
-            request.state,
-        );
-    }
-    let scope = match validate_scopes(request.scope.as_deref(), client) {
-        Ok(scope) => scope,
-        Err(_) => {
-            return authorization_error_redirect(
-                &request.redirect_uri,
-                "invalid_scope",
-                request.state,
-            );
-        }
+    let (client, scope) = match validate_authorize_request(&state, &request) {
+        Ok(validated) => validated,
+        Err(response) => return *response,
     };
 
     let session = extract_session_id(&headers)
@@ -115,13 +92,20 @@ pub async fn authorize(
 
     let return_to = build_authorize_return(&request);
     if let Some(session) = session {
-        let html = frontend::consent_page(
-            &return_to,
-            &request.client_id,
-            &scope.unwrap_or_default(),
-            &session.username,
-        );
-        return Html(html).into_response();
+        return match client.consent_mode {
+            ConsentMode::Always => {
+                let html = frontend::consent_page(
+                    &return_to,
+                    &request.client_id,
+                    &scope.unwrap_or_default(),
+                    &session.username,
+                );
+                Html(html).into_response()
+            }
+            ConsentMode::Skip => {
+                issue_authorization_code_redirect(&state, request, session.user_id, scope)
+            }
+        };
     }
 
     let html = frontend::login_page(&state.provider.name, &return_to, None);
@@ -177,17 +161,30 @@ pub async fn consent(
     };
 
     let request = parse_authorize_return(&form.return_to);
+    let (_, scope) = match validate_authorize_request(&state, &request) {
+        Ok(validated) => validated,
+        Err(response) => return *response,
+    };
 
     if form.decision != "approve" {
         return authorization_error_redirect(&request.redirect_uri, "access_denied", request.state);
     }
 
+    issue_authorization_code_redirect(&state, request, session.user_id, scope)
+}
+
+fn issue_authorization_code_redirect(
+    state: &AppState,
+    request: AuthorizeRequest,
+    user_id: String,
+    scope: Option<String>,
+) -> Response {
     let Some(code) = state.auth_store.issue_authorization_code(
         NewAuthorizationCode {
             client_id: request.client_id,
-            user_id: session.user_id,
+            user_id,
             redirect_uri: request.redirect_uri.clone(),
-            scope: request.scope,
+            scope,
             nonce: request.nonce,
             code_challenge: request.code_challenge,
             code_challenge_method: request.code_challenge_method,
@@ -468,6 +465,37 @@ fn validate_scopes(requested: Option<&str>, client: &Client) -> Result<Option<St
             }
         }
     }
+}
+
+fn validate_authorize_request<'a>(
+    state: &'a AppState,
+    request: &AuthorizeRequest,
+) -> Result<(&'a Client, Option<String>), Box<Response>> {
+    let client = state
+        .clients
+        .get(&request.client_id)
+        .ok_or_else(|| Box::new(authorization_error_response("unauthorized_client", None)))?;
+    if !client.redirect_uris.contains(&request.redirect_uri) {
+        return Err(Box::new(authorization_error_response(
+            "invalid_request",
+            Some("redirect_uri is not registered for client"),
+        )));
+    }
+    if request.response_type != "code" || !client.response_types.contains("code") {
+        return Err(Box::new(authorization_error_redirect(
+            &request.redirect_uri,
+            "unsupported_response_type",
+            request.state.clone(),
+        )));
+    }
+    let scope = validate_scopes(request.scope.as_deref(), client).map_err(|_| {
+        Box::new(authorization_error_redirect(
+            &request.redirect_uri,
+            "invalid_scope",
+            request.state.clone(),
+        ))
+    })?;
+    Ok((client, scope))
 }
 
 fn scope_includes_openid(scope_text: Option<&str>) -> bool {

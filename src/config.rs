@@ -49,6 +49,17 @@ pub struct ClientConfig {
     #[serde(default = "default_pkce_required")]
     #[schemars(default = "default_pkce_required")]
     pub require_pkce: bool,
+    #[serde(default)]
+    #[schemars(default)]
+    pub consent_mode: ConsentMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsentMode {
+    #[default]
+    Always,
+    Skip,
 }
 
 const fn default_enabled() -> bool {
@@ -78,6 +89,7 @@ pub struct Client {
     pub redirect_uris: BTreeSet<String>,
     pub response_types: BTreeSet<String>,
     pub require_pkce: bool,
+    pub consent_mode: ConsentMode,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -184,6 +196,7 @@ fn build_clients(clients: Vec<ClientConfig>) -> HashMap<String, Client> {
                 redirect_uris: client.redirect_uris.into_iter().collect(),
                 response_types: client.response_types.into_iter().collect(),
                 require_pkce: client.require_pkce,
+                consent_mode: client.consent_mode,
             },
         );
     }

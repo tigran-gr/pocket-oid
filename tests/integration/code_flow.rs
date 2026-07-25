@@ -102,6 +102,11 @@ async fn completes_authorization_code_flow() {
     )
     .await;
     assert_eq!(authorize_with_session.status(), StatusCode::OK);
+    let body = to_bytes(authorize_with_session.into_body(), usize::MAX)
+        .await
+        .expect("response body should read");
+    let html = String::from_utf8(body.to_vec()).expect("consent page should be utf-8");
+    assert!(html.contains("<h1>Consent</h1>"));
 
     let consent = request(
         app.clone(),
@@ -152,6 +157,85 @@ async fn completes_authorization_code_flow() {
     let (_, jwks) = get_json(app, "/jwks.json").await;
     let claims = verify_jwt_with_jwks(token, &jwks);
     assert_eq!(claims["sub"], "user-alice");
+}
+
+#[tokio::test]
+async fn skips_consent_for_client_configured_to_skip() {
+    let config_dir = TempConfigDir::with_consent_mode("skip");
+    let app = AppState::initialize(config_dir.path())
+        .expect("app state should initialize")
+        .router();
+    let authorize_path = build_authorize_path(
+        "svc-a",
+        "https://app.example.local/callback",
+        "default",
+        Some("skip-consent-state"),
+        None,
+    );
+
+    let login = request(
+        app.clone(),
+        Request::post("/login")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form_body(&[
+                ("username", "alice"),
+                ("password", "password123"),
+                ("return_to", &authorize_path),
+            ])))
+            .expect("request should build"),
+    )
+    .await;
+    assert_eq!(login.status(), StatusCode::SEE_OTHER);
+    let session_cookie = session_cookie(&login);
+
+    let authorize_with_session = request(
+        app.clone(),
+        Request::get(&authorize_path)
+            .header(header::COOKIE, session_cookie)
+            .body(Body::empty())
+            .expect("request should build"),
+    )
+    .await;
+    assert_eq!(authorize_with_session.status(), StatusCode::SEE_OTHER);
+    let location = authorize_with_session
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .expect("location should be present");
+    assert!(location.starts_with("https://app.example.local/callback?"));
+    assert_eq!(
+        query_value(location, "state").as_deref(),
+        Some("skip-consent-state")
+    );
+    let code = query_value(location, "code").expect("code should be present");
+
+    let token_response = request(
+        app,
+        Request::post("/oauth/token")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form_body(&[
+                ("grant_type", "authorization_code"),
+                ("client_id", "svc-a"),
+                ("client_secret", "supersecret"),
+                ("redirect_uri", "https://app.example.local/callback"),
+                ("code", &code),
+            ])))
+            .expect("request should build"),
+    )
+    .await;
+    assert_eq!(token_response.status(), StatusCode::OK);
+}
+
+#[test]
+fn rejects_unknown_consent_mode() {
+    let config_dir = TempConfigDir::with_consent_mode("remember");
+    let error = AppState::initialize(config_dir.path())
+        .err()
+        .expect("unknown consent mode should fail configuration");
+    assert!(
+        error.to_string().contains("remember"),
+        "error should identify the invalid consent mode: {error}"
+    );
 }
 
 #[tokio::test]
@@ -519,6 +603,33 @@ impl TempConfigDir {
         client.insert(
             "response_types".to_string(),
             Value::Array(vec![Value::String("code".to_string())]),
+        );
+        fs::write(
+            &clients_path,
+            serde_json::to_vec_pretty(&clients).expect("clients fixture should serialize"),
+        )
+        .expect("temp clients fixture should write");
+
+        Self { path: root }
+    }
+
+    fn with_consent_mode(consent_mode: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("pocket-oid-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("temp config directory should be created");
+        copy_dir_all(&fixture_config_dir("config-basic"), &root);
+
+        let clients_path = root.join("clients.json");
+        let mut clients: Vec<Value> = serde_json::from_slice(
+            &fs::read(&clients_path).expect("clients fixture should be readable"),
+        )
+        .expect("clients fixture should parse");
+        let client = clients
+            .first_mut()
+            .and_then(Value::as_object_mut)
+            .expect("config-basic should contain a client object");
+        client.insert(
+            "consent_mode".to_string(),
+            Value::String(consent_mode.to_string()),
         );
         fs::write(
             &clients_path,
