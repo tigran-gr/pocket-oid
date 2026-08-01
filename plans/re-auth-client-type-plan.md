@@ -135,7 +135,7 @@ On callback:
 
 ### 4.4 Local code and token exchange
 
-Extend `AuthorizationCodeRecord` to carry re-auth context:
+Extend `AuthorizationCodeRecord` to carry the validated upstream authentication result:
 
 ```rust
 pub struct AuthorizationCodeRecord {
@@ -145,10 +145,10 @@ pub struct AuthorizationCodeRecord {
 
 pub enum AuthContext {
     Local,
-    ReAuth(ReAuthContext),
+    ReAuth(UpstreamAuthenticationResult),
 }
 
-pub struct ReAuthContext {
+pub struct UpstreamAuthenticationResult {
     pub provider_id: String,
     pub upstream_subject: String,
     pub upstream_issuer: String,
@@ -157,7 +157,7 @@ pub struct ReAuthContext {
 }
 ```
 
-During `POST /oauth/token`, when an authorization code has `AuthContext::ReAuth`, render the normal Pocket-OID token and apply the configured wrapping policy.
+During `POST /oauth/token`, when an authorization code has `AuthContext::ReAuth`, use its `UpstreamAuthenticationResult` to render the normal Pocket-OID token and apply the configured wrapping policy.
 
 ## 5) Token wrapping policy
 
@@ -252,7 +252,7 @@ Prefer a focused internal module first. If HTTP mocking becomes painful, introdu
 
 ### Token rendering
 
-- Extend `TokenContext` with optional re-auth context.
+- Extend `TokenContext` with an optional upstream authentication result.
 - Add token-template placeholders for re-auth:
   - `${reauth.provider_id}`
   - `${reauth.issuer}`
@@ -325,7 +325,7 @@ Prefer a focused internal module first. If HTTP mocking becomes painful, introdu
 
 ### Phase 4 — Token context wrapping
 
-1. Extend authorization-code records with re-auth context.
+1. Extend authorization-code records with the upstream authentication result.
 2. Extend token rendering with selected upstream claims.
 3. Add integration coverage for downstream token contents.
 
@@ -345,4 +345,3 @@ Prefer a focused internal module first. If HTTP mocking becomes painful, introdu
 - Do we need refresh-token support, or only short-lived access/id tokens?
 - Should trusted providers be globally configured in `trusted_providers.json`, embedded per client, or both?
 - Should upstream provider metadata be discovered from `/.well-known/openid-configuration` instead of fully configured?
-
