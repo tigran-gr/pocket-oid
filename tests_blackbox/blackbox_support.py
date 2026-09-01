@@ -104,7 +104,13 @@ def query_value(url: str, key: str) -> str:
     return values[0]
 
 
-def authorize_path(redirect_uri: str, state: str, nonce: str) -> str:
+def authorize_path(
+    redirect_uri: str,
+    state: str,
+    nonce: str,
+    code_challenge: str | None = None,
+    code_challenge_method: str | None = None,
+) -> str:
     params = [
         ("response_type", "code"),
         ("client_id", "svc-a"),
@@ -113,11 +119,17 @@ def authorize_path(redirect_uri: str, state: str, nonce: str) -> str:
         ("state", state),
         ("nonce", nonce),
     ]
+    if code_challenge is not None:
+        params.append(("code_challenge", code_challenge))
+    if code_challenge_method is not None:
+        params.append(("code_challenge_method", code_challenge_method))
     query = "&".join(f"{key}={value.replace(' ', '%20')}" for key, value in params)
     return f"/authorize?{query}"
 
 
-def enable_openid_scope(config_dir: Path, redirect_uri: str | None = None):
+def enable_openid_scope(
+    config_dir: Path, redirect_uri: str | None = None, require_pkce: bool = False
+):
     clients_path = config_dir / "clients.json"
     clients = json.loads(clients_path.read_text())
     client = clients[0]
@@ -125,6 +137,8 @@ def enable_openid_scope(config_dir: Path, redirect_uri: str | None = None):
     client["response_types"] = ["code"]
     if redirect_uri is not None:
         client["redirect_uris"] = [redirect_uri]
+    if require_pkce:
+        client["require_pkce"] = True
     clients_path.write_text(json.dumps(clients))
 
 

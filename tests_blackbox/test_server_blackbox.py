@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import os
 import subprocess
 import time
@@ -125,6 +127,99 @@ class BlackBoxTests(unittest.TestCase):
             self.assertEqual(claims["nonce"], nonce)
             self.assertGreater(claims["exp"], int(time.time()))
             self.assertLessEqual(abs(int(time.time()) - claims["iat"]), 30)
+        finally:
+            server.stop()
+
+    def test_authorization_code_flow_with_s256_pkce(self):
+        server = ServerProcess(
+            "config-basic",
+            configure_config=lambda config_dir: enable_openid_scope(
+                config_dir, require_pkce=True
+            ),
+        )
+        server.start()
+        try:
+            redirect_uri = "https://app.example.local/callback"
+            state = "state-pkce-blackbox"
+            nonce = "nonce-pkce-blackbox"
+            verifier = "a-pkce-verifier-used-only-by-this-test"
+            challenge = base64.urlsafe_b64encode(
+                hashlib.sha256(verifier.encode("ascii")).digest()
+            ).rstrip(b"=").decode("ascii")
+            request_path = authorize_path(
+                redirect_uri,
+                state,
+                nonce,
+                code_challenge=challenge,
+                code_challenge_method="S256",
+            )
+
+            login_status, _, _ = http_get_text(f"{server.base_url}{request_path}")
+            self.assertEqual(login_status, 200)
+
+            login_status, _, login_headers = http_post_form_raw(
+                f"{server.base_url}/login",
+                {
+                    "username": "alice",
+                    "password": "password123",
+                    "return_to": request_path,
+                },
+                follow_redirects=False,
+            )
+            self.assertEqual(login_status, 303)
+            cookie = session_cookie(login_headers)
+
+            def issue_code():
+                consent_status, _, _ = http_get_text(
+                    f"{server.base_url}{request_path}",
+                    headers={"cookie": cookie},
+                )
+                self.assertEqual(consent_status, 200)
+                consent_status, _, consent_headers = http_post_form_raw(
+                    f"{server.base_url}/consent",
+                    {"decision": "approve", "return_to": request_path},
+                    headers={"cookie": cookie},
+                    follow_redirects=False,
+                )
+                self.assertEqual(consent_status, 303)
+                callback_url = consent_headers.get("location")
+                self.assertTrue(callback_url.startswith(redirect_uri))
+                self.assertEqual(query_value(callback_url, "state"), state)
+                return query_value(callback_url, "code")
+
+            incorrect_verifier_status, incorrect_verifier_error = http_post_form(
+                f"{server.base_url}/oauth/token",
+                {
+                    "grant_type": "authorization_code",
+                    "client_id": "svc-a",
+                    "client_secret": "supersecret",
+                    "redirect_uri": redirect_uri,
+                    "code": issue_code(),
+                    "code_verifier": "incorrect-verifier",
+                },
+            )
+            self.assertEqual(incorrect_verifier_status, 400)
+            self.assertEqual(incorrect_verifier_error["error"], "invalid_grant")
+            self.assertEqual(
+                incorrect_verifier_error["error_description"],
+                "pkce verification failed",
+            )
+
+            token_status, token = http_post_form(
+                f"{server.base_url}/oauth/token",
+                {
+                    "grant_type": "authorization_code",
+                    "client_id": "svc-a",
+                    "client_secret": "supersecret",
+                    "redirect_uri": redirect_uri,
+                    "code": issue_code(),
+                    "code_verifier": verifier,
+                },
+            )
+            self.assertEqual(token_status, 200)
+            self.assertEqual(token["token_type"], "Bearer")
+            self.assertEqual(token["scope"], "openid default")
+            self.assertIn("id_token", token)
         finally:
             server.stop()
 

@@ -14,9 +14,11 @@ use axum::{
     response::Html,
     routing::get,
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use pocket_oid::app::AppState;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::oneshot,
@@ -223,6 +225,122 @@ async fn skips_consent_for_client_configured_to_skip() {
             .expect("request should build"),
     )
     .await;
+    assert_eq!(token_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn requires_and_verifies_s256_pkce_for_authorization_code_flow() {
+    let config_dir = TempConfigDir::with_pkce_required();
+    let app = AppState::initialize(config_dir.path())
+        .expect("app state should initialize")
+        .router();
+    let verifier = "a-pkce-verifier-used-only-by-this-test";
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let authorize_path = format!(
+        "{}&code_challenge={challenge}&code_challenge_method=S256",
+        build_authorize_path(
+            "svc-a",
+            "https://app.example.local/callback",
+            "default",
+            None,
+            None,
+        )
+    );
+    let authorize_without_pkce = build_authorize_path(
+        "svc-a",
+        "https://app.example.local/callback",
+        "default",
+        None,
+        None,
+    );
+
+    let login = request(
+        app.clone(),
+        Request::post("/login")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form_body(&[
+                ("username", "alice"),
+                ("password", "password123"),
+                ("return_to", &authorize_path),
+            ])))
+            .expect("request should build"),
+    )
+    .await;
+    assert_eq!(login.status(), StatusCode::SEE_OTHER);
+    let session_cookie = session_cookie(&login);
+
+    let missing_challenge_code =
+        authorization_code(app.clone(), &authorize_without_pkce, &session_cookie).await;
+    let missing_challenge_response = request(
+        app.clone(),
+        Request::post("/oauth/token")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form_body(&[
+                ("grant_type", "authorization_code"),
+                ("client_id", "svc-a"),
+                ("client_secret", "supersecret"),
+                ("redirect_uri", "https://app.example.local/callback"),
+                ("code", &missing_challenge_code),
+            ])))
+            .expect("request should build"),
+    )
+    .await;
+    assert_eq!(missing_challenge_response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(missing_challenge_response.into_body(), usize::MAX)
+        .await
+        .expect("response body should read");
+    let error: Value = serde_json::from_slice(&body).expect("response should be valid JSON");
+    assert_eq!(error["error"], "invalid_grant");
+    assert_eq!(
+        error["error_description"],
+        "pkce is required for this client"
+    );
+
+    let incorrect_verifier_code =
+        authorization_code(app.clone(), &authorize_path, &session_cookie).await;
+    let incorrect_verifier_response = request(
+        app.clone(),
+        Request::post("/oauth/token")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form_body(&[
+                ("grant_type", "authorization_code"),
+                ("client_id", "svc-a"),
+                ("client_secret", "supersecret"),
+                ("redirect_uri", "https://app.example.local/callback"),
+                ("code", &incorrect_verifier_code),
+                ("code_verifier", "incorrect-verifier"),
+            ])))
+            .expect("request should build"),
+    )
+    .await;
+    assert_eq!(
+        incorrect_verifier_response.status(),
+        StatusCode::BAD_REQUEST
+    );
+    let body = to_bytes(incorrect_verifier_response.into_body(), usize::MAX)
+        .await
+        .expect("response body should read");
+    let error: Value = serde_json::from_slice(&body).expect("response should be valid JSON");
+    assert_eq!(error["error"], "invalid_grant");
+    assert_eq!(error["error_description"], "pkce verification failed");
+
+    let code = authorization_code(app.clone(), &authorize_path, &session_cookie).await;
+    let token_response = request(
+        app,
+        Request::post("/oauth/token")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form_body(&[
+                ("grant_type", "authorization_code"),
+                ("client_id", "svc-a"),
+                ("client_secret", "supersecret"),
+                ("redirect_uri", "https://app.example.local/callback"),
+                ("code", &code),
+                ("code_verifier", verifier),
+            ])))
+            .expect("request should build"),
+    )
+    .await;
+
     assert_eq!(token_response.status(), StatusCode::OK);
 }
 
@@ -575,6 +693,34 @@ impl Drop for LoopbackListener {
 }
 
 impl TempConfigDir {
+    fn with_pkce_required() -> Self {
+        let root = std::env::temp_dir().join(format!("pocket-oid-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("temp config directory should be created");
+        copy_dir_all(&fixture_config_dir("config-basic"), &root);
+
+        let clients_path = root.join("clients.json");
+        let mut clients: Vec<Value> = serde_json::from_slice(
+            &fs::read(&clients_path).expect("clients fixture should be readable"),
+        )
+        .expect("clients fixture should parse");
+        let client = clients
+            .first_mut()
+            .and_then(Value::as_object_mut)
+            .expect("config-basic should contain a client object");
+        client.insert("require_pkce".to_string(), Value::Bool(true));
+        client.insert(
+            "consent_mode".to_string(),
+            Value::String("skip".to_string()),
+        );
+        fs::write(
+            &clients_path,
+            serde_json::to_vec_pretty(&clients).expect("clients fixture should serialize"),
+        )
+        .expect("temp clients fixture should write");
+
+        Self { path: root }
+    }
+
     fn with_loopback_redirect(redirect_uri: &str) -> Self {
         let root = std::env::temp_dir().join(format!("pocket-oid-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("temp config directory should be created");
@@ -751,6 +897,24 @@ fn query_value(url: &str, key: &str) -> Option<String> {
         let (name, value) = pair.split_once('=')?;
         (name == key).then(|| value.to_string())
     })
+}
+
+async fn authorization_code(app: Router, authorize_path: &str, session_cookie: &str) -> String {
+    let response = request(
+        app,
+        Request::get(authorize_path)
+            .header(header::COOKIE, session_cookie)
+            .body(Body::empty())
+            .expect("request should build"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .expect("authorization response should redirect");
+    query_value(location, "code").expect("authorization response should include a code")
 }
 
 fn path_from_url(url: &str) -> String {
