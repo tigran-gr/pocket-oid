@@ -75,6 +75,15 @@ Notes:
 - Later provider adapters can add `type = "oauth2_userinfo"` for providers like Facebook/Meta where identity comes from token introspection/userinfo APIs rather than an OIDC ID token.
 - `auth_mode` defaults to `"local"` so current clients keep working.
 
+### 3.1 Authorization request parameter policy
+
+- `auth_mode` is registered client configuration, not an `/authorize` request parameter.
+- Pocket-OID resolves `auth_mode` from the validated `client_id`; a browser request cannot override or weaken it.
+- An `auth_mode=local` or `auth_mode=re_auth` query parameter must not influence authentication routing. It should be treated as an unrecognized extension parameter and ignored.
+- If clients later need to suggest one of several permitted upstream providers, add a vendor-prefixed hint such as `pocket_oid_idp_hint=keycloak-local`.
+- A provider hint is advisory only. Pocket-OID must check it against the providers explicitly allowed for the registered client and reject unsupported values without starting authentication.
+- The standard OIDC `prompt=login` parameter remains separate: it requests fresh authentication using the client's configured mode. For a re-auth client, Pocket-OID should propagate an appropriate fresh-login request to the upstream provider; it must not switch the client to local authentication.
+
 ## 4) Flow
 
 ### 4.1 Downstream authorization request
@@ -86,8 +95,9 @@ Notes:
    - response type is allowed
    - requested scopes are allowed
    - PKCE policy is satisfied if required
-3. If `auth_mode = "local"`, keep current local login and consent behavior.
-4. If `auth_mode = "re_auth"`, create a short-lived pending re-auth transaction and redirect the browser to the upstream authorization endpoint.
+3. Pocket-OID loads `auth_mode` from the registered client configuration; authorization request parameters cannot override it.
+4. If configured `auth_mode = "local"`, keep current local login and consent behavior.
+5. If configured `auth_mode = "re_auth"`, create a short-lived pending re-auth transaction and redirect the browser to the upstream authorization endpoint.
 
 ### 4.2 Upstream authorization request
 
@@ -233,8 +243,12 @@ Example rendered claims:
 ### Handlers
 
 - Update `/authorize`:
+  - resolve `auth_mode` only from the registered client selected by `client_id`
+  - ignore any request-supplied `auth_mode` parameter
   - preserve current local flow for `auth_mode = local`
   - branch to re-auth redirect for `auth_mode = re_auth`
+  - if provider hints are added later, validate them against the client's provider allowlist
+  - interpret `prompt=login` as fresh authentication within the configured mode, not as mode selection
 - Add `GET /reauth/callback/:provider_id`.
 - Keep local error responses for invalid downstream redirect URI.
 - Only redirect to downstream redirect URIs that were already validated and stored in the pending transaction.
@@ -278,6 +292,9 @@ Prefer a focused internal module first. If HTTP mocking becomes painful, introdu
 
 - Config parsing defaults `auth_mode` to local.
 - Re-auth clients fail startup when `provider_id` is missing/unknown.
+- Request-supplied `auth_mode` cannot override the registered client mode.
+- Provider hints, if supported, accept only providers allowed for the registered client.
+- `prompt=login` preserves the registered client mode and requests fresh authentication.
 - Upstream authorization URL contains expected state, nonce, redirect URI, scopes, and PKCE challenge.
 - Pending re-auth transaction consumes once and expires.
 - ID-token validation rejects wrong issuer, audience, nonce, expired token, and bad signature.
@@ -289,6 +306,7 @@ Prefer a focused internal module first. If HTTP mocking becomes painful, introdu
 - Re-auth callback with bad state returns local error and does not issue a code.
 - Upstream authentication error maps to downstream authorization error using the stored validated downstream redirect URI.
 - Invalid downstream `redirect_uri` never starts upstream re-auth.
+- A re-auth client cannot downgrade to local authentication by adding `auth_mode=local` to `/authorize`.
 - Token exchange for local Pocket-OID code includes configured re-auth claims.
 - Code replay still fails.
 
