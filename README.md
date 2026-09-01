@@ -57,6 +57,16 @@ keys/signing-key.pem
 and listen address. The issuer should be the externally reachable base URL used
 by clients; it is used to construct the discovery and JWKS URLs.
 
+To replace the login screen's default gradient with a solid color, optionally
+set `login_background_color` to a hex color in `provider.json`:
+
+```json
+"login_background_color": "#1a2b3c"
+```
+
+Supported values are `#RGB`, `#RGBA`, `#RRGGBB`, and `#RRGGBBAA`. Omit the
+setting (or set it to `null`) to retain the default background.
+
 `clients.json` is an array of OAuth clients. Each client needs `client_id` and
 `client_secret`; it may additionally set an audience, allowed scopes, token TTL,
 redirect URIs, supported response types, PKCE policy, consent mode, and token

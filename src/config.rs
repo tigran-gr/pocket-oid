@@ -20,6 +20,9 @@ pub struct ProviderSettings {
     pub issuer: String,
     pub token_ttl_seconds: u64,
     pub listen: String,
+    #[serde(default)]
+    #[schemars(default)]
+    pub login_background_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -219,6 +222,7 @@ impl LoadedConfig {
     pub fn load_from_directory<P: AsRef<Path>>(path: P) -> Result<Self, AppError> {
         let root = path.as_ref();
         let provider: ProviderSettings = read_json(root.join("provider.json"))?;
+        validate_provider_settings(&provider)?;
         let raw_clients: Value = read_json_value(root.join("clients.json"))?;
         validate_json(&schema_for!(Vec<ClientConfig>), &raw_clients)?;
         let clients_vec: Vec<ClientConfig> = serde_json::from_value(raw_clients)?;
@@ -292,6 +296,25 @@ fn build_clients(clients: Vec<ClientConfig>) -> Result<HashMap<String, Client>, 
         );
     }
     Ok(map)
+}
+
+fn validate_provider_settings(provider: &ProviderSettings) -> Result<(), AppError> {
+    let Some(color) = provider.login_background_color.as_deref() else {
+        return Ok(());
+    };
+
+    let valid_length = matches!(color.len(), 4 | 5 | 7 | 9);
+    let valid_hex = color
+        .strip_prefix('#')
+        .is_some_and(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    if !valid_length || !valid_hex {
+        return Err(AppError::Config(
+            "login_background_color must be a #RGB, #RGBA, #RRGGBB, or #RRGGBBAA hex color"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn build_trusted_providers(

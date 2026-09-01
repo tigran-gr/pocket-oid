@@ -13,9 +13,20 @@ fn escape_html(value: &str) -> String {
     escaped
 }
 
-pub fn login_page(provider_name: &str, return_to: &str, error: Option<&str>) -> String {
+pub fn login_page(
+    provider_name: &str,
+    return_to: &str,
+    error: Option<&str>,
+    background_color: Option<&str>,
+) -> String {
     let escaped_provider_name = escape_html(provider_name);
     let escaped_return_to = escape_html(return_to);
+    let page_background = background_color.map_or_else(
+        || {
+            "background:\n          radial-gradient(circle at top, rgba(20, 184, 166, 0.14), transparent 34rem),\n          linear-gradient(180deg, #fbfefd 0%, #f2f8f7 100%);".to_string()
+        },
+        |color| format!("background: {color};"),
+    );
     let error_html = error
         .map(|message| {
             format!(
@@ -47,9 +58,7 @@ pub fn login_page(provider_name: &str, return_to: &str, error: Option<&str>) -> 
       body {{
         min-height: 100vh;
         margin: 0;
-        background:
-          radial-gradient(circle at top, rgba(20, 184, 166, 0.14), transparent 34rem),
-          linear-gradient(180deg, #fbfefd 0%, #f2f8f7 100%);
+        {page_background}
       }}
 
       body,
@@ -326,13 +335,26 @@ mod tests {
 
     #[test]
     fn login_page_renders_post_form_markup() {
-        let html = login_page("Pocket-OID", "/authorize?response_type=code", None);
+        let html = login_page("Pocket-OID", "/authorize?response_type=code", None, None);
 
         assert!(html.contains(r#"<form method="post" action="/login">"#));
         assert!(html.contains(r#"name="return_to""#));
         assert!(html.contains(r#"<p class="brand-name">Pocket-OID</p>"#));
         assert!(html.contains("Access Pocket-OID."));
         assert!(!html.contains(r#"\""#));
+    }
+
+    #[test]
+    fn login_page_uses_configured_background_color() {
+        let html = login_page(
+            "Pocket-OID",
+            "/authorize?response_type=code",
+            None,
+            Some("#1a2b3c"),
+        );
+
+        assert!(html.contains("background: #1a2b3c;"));
+        assert!(!html.contains("radial-gradient"));
     }
 
     #[test]

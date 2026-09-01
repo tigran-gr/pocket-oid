@@ -137,7 +137,12 @@ pub async fn authorize(
         };
     }
 
-    let html = frontend::login_page(&state.provider.name, &return_to, None);
+    let html = frontend::login_page(
+        &state.provider.name,
+        &return_to,
+        None,
+        state.provider.login_background_color.as_deref(),
+    );
     Html(html).into_response()
 }
 
@@ -147,6 +152,7 @@ pub async fn login(State(state): State<AppState>, Form(form): Form<LoginForm>) -
             &state.provider.name,
             &form.return_to,
             Some("Invalid credentials"),
+            state.provider.login_background_color.as_deref(),
         ))
         .into_response();
     };
@@ -155,6 +161,7 @@ pub async fn login(State(state): State<AppState>, Form(form): Form<LoginForm>) -
             &state.provider.name,
             &form.return_to,
             Some("Invalid credentials"),
+            state.provider.login_background_color.as_deref(),
         ))
         .into_response();
     }

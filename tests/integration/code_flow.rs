@@ -79,6 +79,8 @@ async fn completes_authorization_code_flow() {
         .expect("response body should read");
     let html = String::from_utf8(body.to_vec()).expect("login page should be utf-8");
     assert!(html.contains(r#"<p class="brand-name">Pocket-OID</p>"#));
+    assert!(html.contains("radial-gradient(circle at top, rgba(20, 184, 166, 0.14)"));
+    assert!(html.contains("linear-gradient(180deg, #fbfefd 0%, #f2f8f7 100%)"));
 
     let login = request(
         app.clone(),
