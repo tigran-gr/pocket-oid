@@ -269,31 +269,23 @@ async fn requires_and_verifies_s256_pkce_for_authorization_code_flow() {
     assert_eq!(login.status(), StatusCode::SEE_OTHER);
     let session_cookie = session_cookie(&login);
 
-    let missing_challenge_code =
-        authorization_code(app.clone(), &authorize_without_pkce, &session_cookie).await;
     let missing_challenge_response = request(
         app.clone(),
-        Request::post("/oauth/token")
-            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(Body::from(form_body(&[
-                ("grant_type", "authorization_code"),
-                ("client_id", "svc-a"),
-                ("client_secret", "supersecret"),
-                ("redirect_uri", "https://app.example.local/callback"),
-                ("code", &missing_challenge_code),
-            ])))
+        Request::get(&authorize_without_pkce)
+            .header(header::COOKIE, session_cookie.clone())
+            .body(Body::empty())
             .expect("request should build"),
     )
     .await;
-    assert_eq!(missing_challenge_response.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(missing_challenge_response.into_body(), usize::MAX)
-        .await
-        .expect("response body should read");
-    let error: Value = serde_json::from_slice(&body).expect("response should be valid JSON");
-    assert_eq!(error["error"], "invalid_grant");
+    assert_eq!(missing_challenge_response.status(), StatusCode::SEE_OTHER);
+    let location = missing_challenge_response
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .expect("authorization response should redirect");
     assert_eq!(
-        error["error_description"],
-        "pkce is required for this client"
+        query_value(location, "error").as_deref(),
+        Some("invalid_request")
     );
 
     let incorrect_verifier_code =

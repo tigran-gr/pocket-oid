@@ -6,3 +6,4 @@ pub mod error;
 pub mod frontend;
 pub mod handlers;
 pub mod token;
+pub mod upstream;

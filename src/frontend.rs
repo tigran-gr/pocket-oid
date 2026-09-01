@@ -282,9 +282,39 @@ pub fn consent_page(return_to: &str, client_id: &str, scope: &str, username: &st
     )
 }
 
+pub fn reauth_consent_page(
+    transaction_id: &str,
+    client_id: &str,
+    scope: &str,
+    subject: &str,
+) -> String {
+    let escaped_transaction_id = escape_html(transaction_id);
+    let escaped_client_id = escape_html(client_id);
+    let escaped_scope = escape_html(scope);
+    let escaped_subject = escape_html(subject);
+    format!(
+        r#"<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Pocket-OID Consent</title></head>
+  <body>
+    <main>
+      <h1>Consent</h1>
+      <p>{escaped_subject}, app '{escaped_client_id}' is requesting access.</p>
+      <p>Requested scopes: {escaped_scope}</p>
+      <form method="post" action="/reauth/consent">
+        <input type="hidden" name="transaction_id" value="{escaped_transaction_id}" />
+        <button type="submit" name="decision" value="approve">Approve</button>
+        <button type="submit" name="decision" value="deny">Deny</button>
+      </form>
+    </main>
+  </body>
+</html>"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{consent_page, escape_html, login_page};
+    use super::{consent_page, escape_html, login_page, reauth_consent_page};
 
     #[test]
     fn escape_html_escapes_text_and_attribute_sensitive_characters() {
@@ -317,5 +347,14 @@ mod tests {
         assert!(html.contains(r#"<form method="post" action="/consent">"#));
         assert!(html.contains(r#"name="decision" value="approve""#));
         assert!(!html.contains(r#"\""#));
+    }
+
+    #[test]
+    fn reauth_consent_page_uses_server_side_transaction_id() {
+        let html = reauth_consent_page("transaction-123", "svc-a", "openid", "partner:user-123");
+
+        assert!(html.contains(r#"<form method="post" action="/reauth/consent">"#));
+        assert!(html.contains(r#"name="transaction_id" value="transaction-123""#));
+        assert!(!html.contains("return_to"));
     }
 }

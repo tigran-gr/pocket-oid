@@ -1,6 +1,6 @@
 use axum::{
     Form, Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
 };
@@ -8,15 +8,20 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use tracing::warn;
 
 use crate::{
     app::{AppState, DiscoveryDocument},
-    auth::NewAuthorizationCode,
-    config::{Client, ConsentMode},
+    auth::{
+        AuthContext, ConsumePendingReauth, DownstreamAuthorizationRequest, NewAuthorizationCode,
+        NewPendingReauthConsent, NewPendingReauthTransaction,
+    },
+    config::{Client, ClientAuthMode, ConsentMode},
     crypto::JwkSet,
     error::ApiError,
     frontend,
     token::TokenContext,
+    upstream::UpstreamAuthorizationRequest,
 };
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +45,7 @@ pub struct AuthorizeRequest {
     pub nonce: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +59,19 @@ pub struct LoginForm {
 pub struct ConsentForm {
     pub decision: String,
     pub return_to: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReauthCallbackRequest {
+    pub state: Option<String>,
+    pub code: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReauthConsentForm {
+    pub decision: String,
+    pub transaction_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,11 +106,17 @@ pub async fn authorize(
         Err(response) => return *response,
     };
 
+    if client.auth_mode == ClientAuthMode::ReAuth {
+        return begin_reauth(&state, request, client, scope).await;
+    }
+
     let session = extract_session_id(&headers)
         .and_then(|session_id| state.auth_store.get_session(&session_id));
 
     let return_to = build_authorize_return(&request);
-    if let Some(session) = session {
+    if let Some(session) =
+        session.filter(|_| !requests_fresh_authentication(request.prompt.as_deref()))
+    {
         return match client.consent_mode {
             ConsentMode::Always => {
                 let html = frontend::consent_page(
@@ -102,9 +127,13 @@ pub async fn authorize(
                 );
                 Html(html).into_response()
             }
-            ConsentMode::Skip => {
-                issue_authorization_code_redirect(&state, request, session.user_id, scope)
-            }
+            ConsentMode::Skip => issue_authorization_code_redirect(
+                &state,
+                request,
+                session.user_id,
+                scope,
+                AuthContext::Local,
+            ),
         };
     }
 
@@ -170,7 +199,7 @@ pub async fn consent(
         return authorization_error_redirect(&request.redirect_uri, "access_denied", request.state);
     }
 
-    issue_authorization_code_redirect(&state, request, session.user_id, scope)
+    issue_authorization_code_redirect(&state, request, session.user_id, scope, AuthContext::Local)
 }
 
 fn issue_authorization_code_redirect(
@@ -178,16 +207,36 @@ fn issue_authorization_code_redirect(
     request: AuthorizeRequest,
     user_id: String,
     scope: Option<String>,
+    auth_context: AuthContext,
+) -> Response {
+    let downstream = DownstreamAuthorizationRequest {
+        client_id: request.client_id,
+        redirect_uri: request.redirect_uri,
+        scope,
+        state: request.state,
+        nonce: request.nonce,
+        code_challenge: request.code_challenge,
+        code_challenge_method: request.code_challenge_method,
+    };
+    issue_authorization_code_redirect_for_downstream(state, downstream, user_id, auth_context)
+}
+
+fn issue_authorization_code_redirect_for_downstream(
+    state: &AppState,
+    downstream: DownstreamAuthorizationRequest,
+    user_id: String,
+    auth_context: AuthContext,
 ) -> Response {
     let Some(code) = state.auth_store.issue_authorization_code(
         NewAuthorizationCode {
-            client_id: request.client_id,
+            client_id: downstream.client_id,
             user_id,
-            redirect_uri: request.redirect_uri.clone(),
-            scope,
-            nonce: request.nonce,
-            code_challenge: request.code_challenge,
-            code_challenge_method: request.code_challenge_method,
+            redirect_uri: downstream.redirect_uri.clone(),
+            scope: downstream.scope,
+            nonce: downstream.nonce,
+            code_challenge: downstream.code_challenge,
+            code_challenge_method: downstream.code_challenge_method,
+            auth_context,
         },
         120,
     ) else {
@@ -195,11 +244,261 @@ fn issue_authorization_code_redirect(
     };
 
     let mut params = vec![format!("code={}", encode_uri_component(&code))];
-    if let Some(state_value) = request.state.as_deref() {
+    if let Some(state_value) = downstream.state.as_deref() {
         params.push(format!("state={}", encode_uri_component(state_value)));
     }
-    let redirect = format!("{}?{}", request.redirect_uri, params.join("&"));
+    let redirect = format!("{}?{}", downstream.redirect_uri, params.join("&"));
     Redirect::to(&redirect).into_response()
+}
+
+async fn begin_reauth(
+    state: &AppState,
+    request: AuthorizeRequest,
+    client: &Client,
+    scope: Option<String>,
+) -> Response {
+    let Some(re_auth) = client.re_auth.as_ref() else {
+        return authorization_error_redirect(
+            &request.redirect_uri,
+            "server_error",
+            request.state.clone(),
+        );
+    };
+    let Some(provider) = state.trusted_providers.get(&re_auth.provider_id) else {
+        return authorization_error_redirect(
+            &request.redirect_uri,
+            "server_error",
+            request.state.clone(),
+        );
+    };
+    let metadata = match state.upstream_client.discover(provider).await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            warn!(provider_id = %provider.provider_id, error = ?error, "upstream OIDC discovery failed");
+            return authorization_error_redirect(
+                &request.redirect_uri,
+                "temporarily_unavailable",
+                request.state.clone(),
+            );
+        }
+    };
+
+    let upstream_state = random_url_safe_token();
+    let upstream_nonce = random_url_safe_token();
+    let pkce_verifier = provider.require_pkce.then(random_url_safe_token);
+    let authorization_url = match state.upstream_client.build_authorization_url(
+        UpstreamAuthorizationRequest {
+            provider,
+            metadata: &metadata,
+            upstream_scopes: &re_auth.upstream_scopes,
+            state: &upstream_state,
+            nonce: &upstream_nonce,
+            pkce_verifier: pkce_verifier.as_deref(),
+            prompt_login: requests_fresh_authentication(request.prompt.as_deref()),
+        },
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            warn!(provider_id = %provider.provider_id, error = ?error, "failed to build upstream authorization URL");
+            return authorization_error_redirect(
+                &request.redirect_uri,
+                "server_error",
+                request.state.clone(),
+            );
+        }
+    };
+
+    let downstream_redirect_uri = request.redirect_uri.clone();
+    let downstream_state = request.state.clone();
+    let downstream = DownstreamAuthorizationRequest {
+        client_id: request.client_id,
+        redirect_uri: request.redirect_uri.clone(),
+        scope,
+        state: request.state,
+        nonce: request.nonce,
+        code_challenge: request.code_challenge,
+        code_challenge_method: request.code_challenge_method,
+    };
+    if state
+        .auth_store
+        .create_pending_reauth(
+            NewPendingReauthTransaction {
+                downstream,
+                provider_id: provider.provider_id.clone(),
+                upstream_state,
+                upstream_nonce,
+                pkce_verifier,
+                provider_metadata: metadata,
+            },
+            300,
+        )
+        .is_none()
+    {
+        return authorization_error_redirect(
+            &downstream_redirect_uri,
+            "server_error",
+            downstream_state,
+        );
+    }
+
+    Redirect::to(&authorization_url).into_response()
+}
+
+pub async fn reauth_callback(
+    State(state): State<AppState>,
+    Path(provider_id): Path<String>,
+    Query(callback): Query<ReauthCallbackRequest>,
+) -> Response {
+    if !state.trusted_providers.contains_key(&provider_id) {
+        return authorization_error_response("invalid_request", Some("unknown re-auth provider"));
+    }
+    let Some(upstream_state) = callback.state.as_deref() else {
+        return authorization_error_response("invalid_request", Some("upstream state is required"));
+    };
+    let transaction = match state
+        .auth_store
+        .consume_pending_reauth(upstream_state, &provider_id)
+    {
+        ConsumePendingReauth::Found(transaction) => *transaction,
+        ConsumePendingReauth::NotFound => {
+            return authorization_error_response(
+                "invalid_request",
+                Some("upstream state is invalid or expired"),
+            );
+        }
+        ConsumePendingReauth::ProviderMismatch => {
+            return authorization_error_response(
+                "invalid_request",
+                Some("upstream state does not match provider"),
+            );
+        }
+    };
+
+    if let Some(error) = callback.error.as_deref() {
+        return authorization_error_redirect(
+            &transaction.downstream.redirect_uri,
+            map_upstream_authorization_error(error),
+            transaction.downstream.state,
+        );
+    }
+    let Some(code) = callback.code.as_deref() else {
+        return authorization_error_redirect(
+            &transaction.downstream.redirect_uri,
+            "server_error",
+            transaction.downstream.state,
+        );
+    };
+    let Some(provider) = state.trusted_providers.get(&provider_id) else {
+        return authorization_error_redirect(
+            &transaction.downstream.redirect_uri,
+            "server_error",
+            transaction.downstream.state,
+        );
+    };
+    let id_token = match state
+        .upstream_client
+        .exchange_code(
+            provider,
+            &transaction.provider_metadata,
+            code,
+            transaction.pkce_verifier.as_deref(),
+        )
+        .await
+    {
+        Ok(id_token) => id_token,
+        Err(error) => {
+            warn!(provider_id = %provider_id, error = ?error, "upstream token exchange failed");
+            return authorization_error_redirect(
+                &transaction.downstream.redirect_uri,
+                "server_error",
+                transaction.downstream.state,
+            );
+        }
+    };
+    let identity = match state
+        .upstream_client
+        .validate_id_token(
+            &transaction.provider_metadata,
+            provider,
+            &id_token,
+            &transaction.upstream_nonce,
+        )
+        .await
+    {
+        Ok(identity) => identity,
+        Err(error) => {
+            warn!(provider_id = %provider_id, error = ?error, "upstream id_token validation failed");
+            return authorization_error_redirect(
+                &transaction.downstream.redirect_uri,
+                "server_error",
+                transaction.downstream.state,
+            );
+        }
+    };
+    let auth_context = AuthContext::ReAuth {
+        provider_id: provider_id.clone(),
+        upstream_issuer: identity.issuer,
+    };
+    let user_id = format!("{provider_id}:{}", identity.subject);
+    let Some(consent_id) = state.auth_store.create_pending_reauth_consent(
+        NewPendingReauthConsent {
+            downstream: transaction.downstream,
+            user_id,
+            auth_context,
+        },
+        300,
+    ) else {
+        return authorization_error_response("server_error", None);
+    };
+
+    Redirect::to(&format!("/reauth/consent/{consent_id}")).into_response()
+}
+
+pub async fn reauth_consent_page(
+    State(state): State<AppState>,
+    Path(transaction_id): Path<String>,
+) -> Response {
+    let Some(transaction) = state.auth_store.get_pending_reauth_consent(&transaction_id) else {
+        return authorization_error_response(
+            "invalid_request",
+            Some("re-auth consent is invalid or expired"),
+        );
+    };
+    Html(frontend::reauth_consent_page(
+        &transaction.transaction_id,
+        &transaction.downstream.client_id,
+        transaction.downstream.scope.as_deref().unwrap_or_default(),
+        &transaction.user_id,
+    ))
+    .into_response()
+}
+
+pub async fn reauth_consent(
+    State(state): State<AppState>,
+    Form(form): Form<ReauthConsentForm>,
+) -> Response {
+    let Some(transaction) = state
+        .auth_store
+        .consume_pending_reauth_consent(&form.transaction_id)
+    else {
+        return authorization_error_response(
+            "invalid_request",
+            Some("re-auth consent is invalid or expired"),
+        );
+    };
+    if form.decision != "approve" {
+        return authorization_error_redirect(
+            &transaction.downstream.redirect_uri,
+            "access_denied",
+            transaction.downstream.state,
+        );
+    }
+    issue_authorization_code_redirect_for_downstream(
+        &state,
+        transaction.downstream,
+        transaction.user_id,
+        transaction.auth_context,
+    )
 }
 
 pub async fn token_endpoint(
@@ -495,6 +794,22 @@ fn validate_authorize_request<'a>(
             request.state.clone(),
         ))
     })?;
+    if client.require_pkce && request.code_challenge.is_none() {
+        return Err(Box::new(authorization_error_redirect(
+            &request.redirect_uri,
+            "invalid_request",
+            request.state.clone(),
+        )));
+    }
+    if let Some(method) = request.code_challenge_method.as_deref()
+        && !matches!(method, "plain" | "S256")
+    {
+        return Err(Box::new(authorization_error_redirect(
+            &request.redirect_uri,
+            "invalid_request",
+            request.state.clone(),
+        )));
+    }
     Ok((client, scope))
 }
 
@@ -515,6 +830,31 @@ fn extract_session_id(headers: &HeaderMap) -> Option<String> {
             Some((key.trim(), value.trim()))
         })
         .find_map(|(key, value)| (key == "session_id").then(|| value.to_string()))
+}
+
+fn requests_fresh_authentication(prompt: Option<&str>) -> bool {
+    prompt
+        .into_iter()
+        .flat_map(str::split_whitespace)
+        .any(|value| value == "login")
+}
+
+fn random_url_safe_token() -> String {
+    // UUID v4 is generated with the operating system's cryptographically secure random source.
+    // Three UUIDs give a 96-character verifier, within RFC 7636's 43–128 character range.
+    format!(
+        "{}{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+fn map_upstream_authorization_error(error: &str) -> &str {
+    match error {
+        "access_denied" => "access_denied",
+        _ => "temporarily_unavailable",
+    }
 }
 
 fn build_authorize_return(request: &AuthorizeRequest) -> String {
@@ -550,6 +890,9 @@ fn build_authorize_return(request: &AuthorizeRequest) -> String {
             encode_uri_component(code_challenge_method)
         ));
     }
+    if let Some(prompt) = request.prompt.as_deref() {
+        params.push(format!("prompt={}", encode_uri_component(prompt)));
+    }
     format!("/authorize?{}", params.join("&"))
 }
 
@@ -567,6 +910,7 @@ fn parse_authorize_return(return_to: &str) -> AuthorizeRequest {
         nonce: None,
         code_challenge: None,
         code_challenge_method: None,
+        prompt: None,
     };
     for pair in query.split('&') {
         let Some((key, value)) = pair.split_once('=') else {
@@ -582,6 +926,7 @@ fn parse_authorize_return(return_to: &str) -> AuthorizeRequest {
             "nonce" => request.nonce = Some(value),
             "code_challenge" => request.code_challenge = Some(value),
             "code_challenge_method" => request.code_challenge_method = Some(value),
+            "prompt" => request.prompt = Some(value),
             _ => {}
         }
     }

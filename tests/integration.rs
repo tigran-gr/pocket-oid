@@ -6,6 +6,8 @@ mod code_flow;
 mod health;
 #[path = "integration/metadata.rs"]
 mod metadata;
+#[path = "integration/reauth.rs"]
+mod reauth;
 #[path = "integration/token_errors.rs"]
 mod token_errors;
 #[path = "integration/token_success.rs"]

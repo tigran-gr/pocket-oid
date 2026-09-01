@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use url::Url;
 
 use crate::error::AppError;
 
@@ -52,6 +53,70 @@ pub struct ClientConfig {
     #[serde(default)]
     #[schemars(default)]
     pub consent_mode: ConsentMode,
+    #[serde(default)]
+    #[schemars(default)]
+    pub auth_mode: ClientAuthMode,
+    #[serde(default)]
+    #[schemars(default)]
+    pub re_auth: Option<ReAuthClientConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientAuthMode {
+    #[default]
+    Local,
+    ReAuth,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ReAuthClientConfig {
+    pub provider_id: String,
+    #[serde(default)]
+    #[schemars(default)]
+    pub upstream_scopes: Vec<String>,
+    #[serde(default)]
+    #[schemars(default)]
+    pub consent: ReAuthConsent,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReAuthConsent {
+    #[default]
+    Local,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TrustedProviderConfig {
+    pub provider_id: String,
+    #[serde(rename = "type", default)]
+    #[schemars(default)]
+    pub provider_type: TrustedProviderType,
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_uri: String,
+    #[serde(default)]
+    #[schemars(default)]
+    pub token_endpoint_auth_method: TokenEndpointAuthMethod,
+    #[serde(default = "default_upstream_pkce_required")]
+    #[schemars(default = "default_upstream_pkce_required")]
+    pub require_pkce: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustedProviderType {
+    #[default]
+    Oidc,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenEndpointAuthMethod {
+    #[default]
+    ClientSecretPost,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -78,6 +143,10 @@ const fn default_pkce_required() -> bool {
     false
 }
 
+const fn default_upstream_pkce_required() -> bool {
+    true
+}
+
 #[derive(Debug, Clone)]
 pub struct Client {
     pub client_id: String,
@@ -90,6 +159,8 @@ pub struct Client {
     pub response_types: BTreeSet<String>,
     pub require_pkce: bool,
     pub consent_mode: ConsentMode,
+    pub auth_mode: ClientAuthMode,
+    pub re_auth: Option<ReAuthClientConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -139,6 +210,7 @@ pub struct LoadedConfig {
     pub provider: ProviderSettings,
     pub clients: HashMap<String, Client>,
     pub users: HashMap<String, User>,
+    pub trusted_providers: HashMap<String, TrustedProviderConfig>,
     pub token_template: Value,
     pub config_root: PathBuf,
 }
@@ -150,10 +222,20 @@ impl LoadedConfig {
         let raw_clients: Value = read_json_value(root.join("clients.json"))?;
         validate_json(&schema_for!(Vec<ClientConfig>), &raw_clients)?;
         let clients_vec: Vec<ClientConfig> = serde_json::from_value(raw_clients)?;
-        let clients = build_clients(clients_vec);
+        let clients = build_clients(clients_vec)?;
         if clients.is_empty() {
             return Err(AppError::Config("no active clients configured".into()));
         }
+        let raw_trusted_providers = read_json_value_optional(root.join("trusted_providers.json"))?
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        validate_json(
+            &schema_for!(Vec<TrustedProviderConfig>),
+            &raw_trusted_providers,
+        )?;
+        let trusted_providers_vec: Vec<TrustedProviderConfig> =
+            serde_json::from_value(raw_trusted_providers)?;
+        let trusted_providers = build_trusted_providers(trusted_providers_vec)?;
+        validate_reauth_clients(&clients, &trusted_providers)?;
         let users_config: UsersConfig = read_json(root.join("users.json"))?;
         let users = build_users_from_config(users_config)?;
         if users.is_empty() {
@@ -171,6 +253,7 @@ impl LoadedConfig {
             provider,
             clients,
             users,
+            trusted_providers,
             token_template,
             config_root: root.to_path_buf(),
         })
@@ -181,9 +264,15 @@ impl LoadedConfig {
     }
 }
 
-fn build_clients(clients: Vec<ClientConfig>) -> HashMap<String, Client> {
+fn build_clients(clients: Vec<ClientConfig>) -> Result<HashMap<String, Client>, AppError> {
     let mut map = HashMap::new();
     for client in clients.into_iter().filter(|c| c.enabled) {
+        if map.contains_key(&client.client_id) {
+            return Err(AppError::Config(format!(
+                "duplicate active client_id '{}'",
+                client.client_id
+            )));
+        }
         map.insert(
             client.client_id.clone(),
             Client {
@@ -197,10 +286,114 @@ fn build_clients(clients: Vec<ClientConfig>) -> HashMap<String, Client> {
                 response_types: client.response_types.into_iter().collect(),
                 require_pkce: client.require_pkce,
                 consent_mode: client.consent_mode,
+                auth_mode: client.auth_mode,
+                re_auth: client.re_auth,
             },
         );
     }
-    map
+    Ok(map)
+}
+
+fn build_trusted_providers(
+    providers: Vec<TrustedProviderConfig>,
+) -> Result<HashMap<String, TrustedProviderConfig>, AppError> {
+    let mut result = HashMap::new();
+    for provider in providers {
+        if provider.provider_id.trim().is_empty() {
+            return Err(AppError::Config(
+                "trusted provider_id must not be empty".to_string(),
+            ));
+        }
+        if provider.provider_id.contains(':') {
+            return Err(AppError::Config(format!(
+                "trusted provider_id '{}' must not contain ':' because it prefixes local subjects",
+                provider.provider_id
+            )));
+        }
+        if result.contains_key(&provider.provider_id) {
+            return Err(AppError::Config(format!(
+                "duplicate trusted provider_id '{}'",
+                provider.provider_id
+            )));
+        }
+        validate_trusted_provider(&provider)?;
+        result.insert(provider.provider_id.clone(), provider);
+    }
+    Ok(result)
+}
+
+fn validate_trusted_provider(provider: &TrustedProviderConfig) -> Result<(), AppError> {
+    validate_absolute_url(&provider.issuer, "issuer")?;
+    validate_absolute_url(&provider.redirect_uri, "redirect_uri")?;
+    if provider.client_id.trim().is_empty() {
+        return Err(AppError::Config(format!(
+            "trusted provider '{}' client_id must not be empty",
+            provider.provider_id
+        )));
+    }
+    if provider.client_secret.is_empty() {
+        return Err(AppError::Config(format!(
+            "trusted provider '{}' client_secret must not be empty",
+            provider.provider_id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_reauth_clients(
+    clients: &HashMap<String, Client>,
+    trusted_providers: &HashMap<String, TrustedProviderConfig>,
+) -> Result<(), AppError> {
+    for client in clients.values() {
+        match (&client.auth_mode, &client.re_auth) {
+            (ClientAuthMode::Local, None) => {}
+            (ClientAuthMode::Local, Some(_)) => {
+                return Err(AppError::Config(format!(
+                    "local client '{}' must not define re_auth settings",
+                    client.client_id
+                )));
+            }
+            (ClientAuthMode::ReAuth, None) => {
+                return Err(AppError::Config(format!(
+                    "re-auth client '{}' must define re_auth settings",
+                    client.client_id
+                )));
+            }
+            (ClientAuthMode::ReAuth, Some(re_auth)) => {
+                if !trusted_providers.contains_key(&re_auth.provider_id) {
+                    return Err(AppError::Config(format!(
+                        "re-auth client '{}' references unknown provider_id '{}'",
+                        client.client_id, re_auth.provider_id
+                    )));
+                }
+                if !re_auth
+                    .upstream_scopes
+                    .iter()
+                    .any(|scope| scope == "openid")
+                {
+                    return Err(AppError::Config(format!(
+                        "re-auth client '{}' upstream_scopes must include 'openid'",
+                        client.client_id
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_absolute_url(value: &str, field_name: &str) -> Result<(), AppError> {
+    let parsed = Url::parse(value).map_err(|err| {
+        AppError::Config(format!(
+            "trusted provider {field_name} must be a valid URL: {err}"
+        ))
+    })?;
+    if parsed.scheme().is_empty() || parsed.host_str().is_none() {
+        return Err(AppError::Config(format!(
+            "trusted provider {field_name} must be an absolute URL"
+        )));
+    }
+    Ok(())
 }
 
 fn build_users(users: Vec<UserConfig>) -> Result<HashMap<String, User>, AppError> {
@@ -288,6 +481,16 @@ fn read_json_value(path: PathBuf) -> Result<Value, AppError> {
     serde_json::from_str(&data).map_err(AppError::from)
 }
 
+fn read_json_value_optional(path: PathBuf) -> Result<Option<Value>, AppError> {
+    match fs::read_to_string(&path) {
+        Ok(data) => serde_json::from_str(&data)
+            .map(Some)
+            .map_err(AppError::from),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AppError::from(error)),
+    }
+}
+
 fn validate_json(schema: &schemars::schema::RootSchema, value: &Value) -> Result<(), AppError> {
     let schema_value = serde_json::to_value(schema)
         .map_err(|err| AppError::Schema(format!("failed to serialize schema: {err}")))?;
@@ -305,7 +508,49 @@ fn validate_json(schema: &schemars::schema::RootSchema, value: &Value) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{UserConfig, UsersConfig, build_users, build_users_from_config};
+    use super::{
+        ClientAuthMode, ClientConfig, UserConfig, UsersConfig, build_clients, build_users,
+        build_users_from_config, validate_reauth_clients,
+    };
+
+    #[test]
+    fn client_auth_mode_defaults_to_local() {
+        let client: ClientConfig = serde_json::from_str(
+            r#"{
+                "client_id": "svc-a",
+                "client_secret": "supersecret"
+            }"#,
+        )
+        .expect("minimal client config should parse");
+
+        assert_eq!(client.auth_mode, ClientAuthMode::Local);
+        assert!(client.re_auth.is_none());
+    }
+
+    #[test]
+    fn reauth_client_requires_a_known_trusted_provider() {
+        let client: ClientConfig = serde_json::from_str(
+            r#"{
+                "client_id": "svc-reauth",
+                "client_secret": "supersecret",
+                "auth_mode": "re_auth",
+                "re_auth": {
+                    "provider_id": "missing-provider",
+                    "upstream_scopes": ["openid"]
+                }
+            }"#,
+        )
+        .expect("re-auth client config should parse");
+        let clients = build_clients(vec![client]).expect("client config should build");
+
+        let error = validate_reauth_clients(&clients, &std::collections::HashMap::new())
+            .expect_err("missing provider should fail validation");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown provider_id 'missing-provider'")
+        );
+    }
 
     #[test]
     fn builds_user_with_sha256_password_hash() {

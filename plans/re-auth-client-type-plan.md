@@ -12,6 +12,15 @@ For a re-auth client:
 
 The first target should be an upstream OIDC provider, including another Pocket-OID instance. Facebook/Meta can be supported later through an OAuth2 provider adapter because it is not the same contract as standard OIDC.
 
+### Settled product decisions
+
+- Re-auth clients use `consent: "local"`: after upstream authentication, Pocket-OID presents its own consent screen before issuing a downstream authorization code. Any consent-skipping policy is deferred.
+- Pocket-OID maps an upstream subject to its local subject as `{provider_id}:{upstream_sub}`. For example, an upstream subject of `user-123` from `partner-pocket-oid` becomes `partner-pocket-oid:user-123`.
+- The initial release must not embed raw upstream token strings or copy an entire upstream token payload into the final Pocket-OID token. Any upstream claim propagation, token reference, or encrypted-token design requires a future explicit consumer requirement and policy.
+- The initial release supports only short-lived access and ID tokens. It does not issue, store, or use refresh tokens.
+- Trusted providers are globally defined in `trusted_providers.json`; each re-auth client references a provider by ID. Provider settings and secrets are not embedded in individual client records.
+- OIDC provider endpoints are obtained through the issuer's `/.well-known/openid-configuration` metadata. Pocket-OID validates that the discovered metadata's issuer exactly matches the configured trusted issuer.
+
 ## 2) Terminology
 
 - **Downstream client**: the app that talks to this Pocket-OID instance.
@@ -38,12 +47,7 @@ Example `clients.json` shape:
     "re_auth": {
       "provider_id": "partner-pocket-oid",
       "upstream_scopes": ["openid", "profile", "email"],
-      "subject_source": "id_token.sub",
-      "consent": "local",
-      "token_wrapping": {
-        "mode": "claims",
-        "claims": ["iss", "sub", "aud", "exp", "email"]
-      }
+      "consent": "local"
     }
   }
 ]
@@ -60,10 +64,6 @@ Add a separate upstream provider config file, for example `trusted_providers.jso
     "client_id": "pocket-oid-proxy",
     "client_secret": "upstream-secret",
     "redirect_uri": "https://pocket-oid.local/reauth/callback/partner-pocket-oid",
-    "authorization_endpoint": "https://partner-idp.example.local/authorize",
-    "token_endpoint": "https://partner-idp.example.local/oauth/token",
-    "jwks_uri": "https://partner-idp.example.local/jwks.json",
-    "userinfo_endpoint": "https://partner-idp.example.local/userinfo",
     "token_endpoint_auth_method": "client_secret_post",
     "require_pkce": true
   }
@@ -139,9 +139,9 @@ On callback:
    - `aud`
    - `exp` / `iat`
    - nonce
-7. Resolve the local authenticated subject from configured `subject_source`.
+7. Resolve `upstream_sub` from the validated upstream ID token's `sub` claim, then set the local subject to `{provider_id}:{upstream_sub}`.
 8. Optionally fetch upstream userinfo if configured.
-9. Continue to local consent or directly issue a local authorization code, depending on `re_auth.consent`.
+9. Continue to Pocket-OID's local consent screen; after consent, issue a local authorization code.
 
 ### 4.4 Local code and token exchange
 
@@ -163,7 +163,6 @@ pub struct UpstreamAuthenticationResult {
     pub upstream_subject: String,
     pub upstream_issuer: String,
     pub upstream_claims: serde_json::Value,
-    pub upstream_tokens: Option<StoredUpstreamTokens>,
 }
 ```
 
@@ -193,9 +192,9 @@ Recommended modes:
    - Add JWE or another encryption envelope and embed encrypted upstream tokens.
    - This is the closest match to true token “wrapping,” but it requires new crypto support and key-management decisions.
 
-Initial implementation should support `claims`, optionally `reference`, and defer `raw`/`encrypted` unless there is a concrete consumer requirement.
+The initial implementation must not include upstream token strings or an entire upstream token payload in Pocket-OID tokens. Defer `claims`, `reference`, `raw`, and `encrypted` modes until a concrete consumer requirement defines an explicit, reviewed policy. If `claims` is later enabled, it must use a narrow allowlist rather than copy the whole upstream payload.
 
-Example rendered claims:
+Future example rendered claims (only after an approved allowlist policy):
 
 ```json
 {
@@ -229,15 +228,14 @@ Example rendered claims:
 - Validate:
   - every re-auth client references an existing provider
   - upstream redirect URI is non-empty
-  - OIDC providers have issuer, authorization endpoint, token endpoint, JWKS URI
+  - OIDC providers have an issuer and required client settings
+  - discovered OIDC metadata has an exact issuer match and includes authorization, token, and JWKS endpoints
   - raw token embedding requires explicit opt-in
 
 ### Runtime state
 
 - Extend `AppState` with `trusted_providers`.
-- Extend `AuthStore` with:
-  - pending re-auth transactions
-  - optional upstream token references for `reference` mode
+- Extend `AuthStore` with pending re-auth transactions. Do not store upstream token references in the initial release; `reference` mode is deferred.
 - Add TTL cleanup on read/consume, mirroring authorization codes.
 
 ### Handlers
@@ -256,9 +254,10 @@ Example rendered claims:
 ### Upstream client module
 
 Add a small OIDC upstream client module:
-- build authorization URL
+- discover and validate provider metadata from `/.well-known/openid-configuration`
+- build authorization URL from discovered metadata
 - exchange code for tokens
-- fetch/cache JWKS
+- fetch/cache JWKS using the discovered URI
 - validate ID token
 - optionally call userinfo
 
@@ -283,7 +282,7 @@ Prefer a focused internal module first. If HTTP mocking becomes painful, introdu
 - Never redirect to a callback URI supplied by the upstream callback request.
 - Never redirect to a downstream URI unless it came from a previously validated downstream authorization request.
 - Namespace upstream claims under `reauth` to avoid collisions with Pocket-OID claims.
-- Do not embed upstream refresh tokens in signed-only JWTs.
+- Do not issue, store, or embed refresh tokens in the initial release.
 - Consider `acr`, `amr`, and `auth_time` propagation later.
 
 ## 8) Test plan
@@ -295,10 +294,11 @@ Prefer a focused internal module first. If HTTP mocking becomes painful, introdu
 - Request-supplied `auth_mode` cannot override the registered client mode.
 - Provider hints, if supported, accept only providers allowed for the registered client.
 - `prompt=login` preserves the registered client mode and requests fresh authentication.
+- OIDC discovery rejects metadata with a mismatched issuer or missing required endpoints.
 - Upstream authorization URL contains expected state, nonce, redirect URI, scopes, and PKCE challenge.
 - Pending re-auth transaction consumes once and expires.
 - ID-token validation rejects wrong issuer, audience, nonce, expired token, and bad signature.
-- Token wrapping renders only configured claims.
+- Initial token rendering does not include raw upstream token strings or an entire upstream payload.
 
 ### Integration tests
 
@@ -307,7 +307,7 @@ Prefer a focused internal module first. If HTTP mocking becomes painful, introdu
 - Upstream authentication error maps to downstream authorization error using the stored validated downstream redirect URI.
 - Invalid downstream `redirect_uri` never starts upstream re-auth.
 - A re-auth client cannot downgrade to local authentication by adding `auth_mode=local` to `/authorize`.
-- Token exchange for local Pocket-OID code includes configured re-auth claims.
+- Token exchange for a re-authenticated Pocket-OID code preserves the provider-prefixed local subject and does not include raw upstream token strings or an entire upstream payload.
 - Code replay still fails.
 
 ### Black-box tests
@@ -334,18 +334,18 @@ Prefer a focused internal module first. If HTTP mocking becomes painful, introdu
 
 ### Phase 3 — OIDC upstream happy path
 
-1. Add upstream authorization URL builder.
+1. Add OIDC discovery and upstream authorization URL builder.
 2. Update `/authorize` to redirect re-auth clients upstream.
 3. Add callback route.
 4. Exchange upstream code for tokens.
 5. Validate upstream ID token.
 6. Issue normal local authorization code.
 
-### Phase 4 — Token context wrapping
+### Phase 4 — Token context propagation (deferred)
 
 1. Extend authorization-code records with the upstream authentication result.
-2. Extend token rendering with selected upstream claims.
-3. Add integration coverage for downstream token contents.
+2. Define an explicit consumer requirement and allowlist before extending token rendering with selected upstream claims.
+3. Add integration coverage for the approved downstream token contents.
 
 ### Phase 5 — Hardening and adapters
 
@@ -357,9 +357,4 @@ Prefer a focused internal module first. If HTTP mocking becomes painful, introdu
 
 ## 10) Open decisions
 
-- Should re-auth clients still show Pocket-OID consent after upstream authentication, or should consent be skipped by default?
-- Should local subject be `provider_id:upstream_sub`, a configured claim, or a stable hash?
-- Is the downstream client supposed to receive raw upstream bearer tokens, or only upstream identity claims?
-- Do we need refresh-token support, or only short-lived access/id tokens?
-- Should trusted providers be globally configured in `trusted_providers.json`, embedded per client, or both?
-- Should upstream provider metadata be discovered from `/.well-known/openid-configuration` instead of fully configured?
+No unresolved product decisions remain from the initial list. Future decisions are required before enabling upstream claim propagation, token references, encrypted token wrapping, consent skipping, or refresh-token support.

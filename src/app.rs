@@ -14,11 +14,12 @@ use tower_http::trace::TraceLayer;
 
 use crate::{
     auth::AuthStore,
-    config::{Client, LoadedConfig, ProviderSettings},
+    config::{Client, LoadedConfig, ProviderSettings, TrustedProviderConfig},
     crypto::{JwkSet, KeyMaterial, load_signing_key},
     error::AppError,
     handlers,
     token::TokenTemplate,
+    upstream::UpstreamClient,
 };
 
 #[derive(Clone)]
@@ -28,6 +29,8 @@ pub struct ApplicationState {
     pub provider: ProviderSettings,
     pub clients: HashMap<String, Client>,
     pub users: HashMap<String, crate::config::User>,
+    pub trusted_providers: HashMap<String, TrustedProviderConfig>,
+    pub upstream_client: UpstreamClient,
     pub token_template: TokenTemplate,
     pub signing_key: KeyMaterial,
     pub jwk_set: JwkSet,
@@ -56,12 +59,15 @@ impl AppState {
         let jwk_set = JwkSet {
             keys: vec![signing_key.jwk.clone()],
         };
+        let upstream_client = UpstreamClient::new()?;
         let scopes_supported = collect_scopes(&config.clients);
         let discovery = DiscoveryDocument::new(&config.provider, &scopes_supported);
         Ok(Self(Arc::new(ApplicationState {
             provider: config.provider,
             clients: config.clients,
             users: config.users,
+            trusted_providers: config.trusted_providers,
+            upstream_client,
             token_template: TokenTemplate::new(config.token_template),
             signing_key,
             jwk_set,
@@ -81,6 +87,15 @@ impl AppState {
             .route("/authorize", get(handlers::authorize))
             .route("/login", post(handlers::login))
             .route("/consent", post(handlers::consent))
+            .route(
+                "/reauth/callback/:provider_id",
+                get(handlers::reauth_callback),
+            )
+            .route(
+                "/reauth/consent/:transaction_id",
+                get(handlers::reauth_consent_page),
+            )
+            .route("/reauth/consent", post(handlers::reauth_consent))
             .route("/healthz", get(handlers::healthz))
             .route("/readyz", get(handlers::readyz))
             .with_state(self.clone())
