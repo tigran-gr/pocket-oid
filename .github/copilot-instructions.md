@@ -22,7 +22,6 @@ changes.
 - [Re-auth plan](../plans/re-auth-client-type-plan.md): settled product decisions
   and design context. Plans also contain future proposals; confirm whether a
   feature exists in code before treating a proposal as implemented.
-- [Original provider plan](../provider-plan.md): historical design context.
 
 Source layout:
 
