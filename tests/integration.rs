@@ -8,6 +8,8 @@ mod health;
 mod metadata;
 #[path = "integration/reauth.rs"]
 mod reauth;
+#[path = "integration/signing.rs"]
+mod signing;
 #[path = "integration/token_errors.rs"]
 mod token_errors;
 #[path = "integration/token_success.rs"]

@@ -6,7 +6,7 @@ use std::{
 
 use jsonschema::JSONSchema;
 use schemars::{JsonSchema, schema_for};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -22,7 +22,33 @@ pub struct ProviderSettings {
     pub listen: String,
     #[serde(default)]
     #[schemars(default)]
+    pub signing_algorithm: SigningAlgorithm,
+    #[serde(default)]
+    #[schemars(default)]
     pub login_background_color: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub enum SigningAlgorithm {
+    #[default]
+    RS256,
+    ES256,
+}
+
+impl SigningAlgorithm {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RS256 => "RS256",
+            Self::ES256 => "ES256",
+        }
+    }
+
+    pub const fn jwt_algorithm(self) -> jsonwebtoken::Algorithm {
+        match self {
+            Self::RS256 => jsonwebtoken::Algorithm::RS256,
+            Self::ES256 => jsonwebtoken::Algorithm::ES256,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -107,6 +133,9 @@ pub struct TrustedProviderConfig {
     #[serde(default = "default_upstream_pkce_required")]
     #[schemars(default = "default_upstream_pkce_required")]
     pub require_pkce: bool,
+    #[serde(default = "default_allowed_signing_algorithms")]
+    #[schemars(default = "default_allowed_signing_algorithms")]
+    pub allowed_signing_algorithms: Vec<SigningAlgorithm>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -149,6 +178,10 @@ const fn default_pkce_required() -> bool {
 
 const fn default_upstream_pkce_required() -> bool {
     true
+}
+
+fn default_allowed_signing_algorithms() -> Vec<SigningAlgorithm> {
+    vec![SigningAlgorithm::RS256]
 }
 
 #[derive(Debug, Clone)]
@@ -347,6 +380,12 @@ fn build_trusted_providers(
 }
 
 fn validate_trusted_provider(provider: &TrustedProviderConfig) -> Result<(), AppError> {
+    if provider.allowed_signing_algorithms.is_empty() {
+        return Err(AppError::Config(format!(
+            "trusted provider '{}' allowed_signing_algorithms must not be empty",
+            provider.provider_id
+        )));
+    }
     validate_absolute_url(&provider.issuer, "issuer")?;
     validate_absolute_url(&provider.redirect_uri, "redirect_uri")?;
     if provider.client_id.trim().is_empty() {
@@ -536,6 +575,41 @@ mod tests {
         ClientAuthMode, ClientConfig, UserConfig, UsersConfig, build_clients, build_users,
         build_users_from_config, validate_reauth_clients,
     };
+
+    #[test]
+    fn upstream_signing_algorithms_default_to_rs256_and_require_a_nonempty_supported_list() {
+        use super::{SigningAlgorithm, TrustedProviderConfig, validate_trusted_provider};
+        let mut config = serde_json::json!({
+            "provider_id": "partner",
+            "issuer": "https://partner.example.test",
+            "client_id": "proxy",
+            "client_secret": "secret",
+            "redirect_uri": "https://pocket.example.test/reauth/callback/partner"
+        });
+        let provider: TrustedProviderConfig = serde_json::from_value(config.clone()).unwrap();
+        assert_eq!(
+            provider.allowed_signing_algorithms,
+            vec![SigningAlgorithm::RS256]
+        );
+
+        config["allowed_signing_algorithms"] = serde_json::json!(["RS256", "ES256"]);
+        let provider: TrustedProviderConfig = serde_json::from_value(config.clone()).unwrap();
+        validate_trusted_provider(&provider).unwrap();
+
+        config["allowed_signing_algorithms"] = serde_json::json!([]);
+        let provider: TrustedProviderConfig = serde_json::from_value(config.clone()).unwrap();
+        assert!(
+            validate_trusted_provider(&provider)
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
+
+        for algorithm in ["HS256", "ES384", "none"] {
+            config["allowed_signing_algorithms"] = serde_json::json!([algorithm]);
+            assert!(serde_json::from_value::<TrustedProviderConfig>(config.clone()).is_err());
+        }
+    }
 
     #[test]
     fn client_auth_mode_defaults_to_local() {

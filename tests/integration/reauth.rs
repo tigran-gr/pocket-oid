@@ -15,7 +15,7 @@ use axum::{
     routing::{get, post},
 };
 use jsonwebtoken::encode;
-use pocket_oid::{app::AppState, crypto::load_signing_key};
+use pocket_oid::{app::AppState, config::SigningAlgorithm, crypto::load_signing_key};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use url::Url;
@@ -29,6 +29,7 @@ struct MockOidcState {
     signing_key: pocket_oid::crypto::KeyMaterial,
     expected_nonce: Arc<Mutex<Option<String>>>,
     token_forms: Arc<Mutex<Vec<HashMap<String, String>>>>,
+    jwks_override: Arc<Mutex<Option<Value>>>,
 }
 
 struct MockOidcProvider {
@@ -254,10 +255,29 @@ async fn upstream_error_uses_the_stored_downstream_redirect() {
 
 #[tokio::test]
 async fn reauth_flow_can_skip_local_consent() {
-    let Some(upstream) = MockOidcProvider::start().await else {
+    reauth_skip_consent_with_signing(SigningAlgorithm::RS256, SigningAlgorithm::RS256).await;
+}
+
+#[tokio::test]
+async fn reauth_accepts_es256_upstream_and_issues_rs256_downstream() {
+    reauth_skip_consent_with_signing(SigningAlgorithm::ES256, SigningAlgorithm::RS256).await;
+}
+
+#[tokio::test]
+async fn reauth_accepts_rs256_upstream_and_issues_es256_downstream() {
+    reauth_skip_consent_with_signing(SigningAlgorithm::RS256, SigningAlgorithm::ES256).await;
+}
+
+async fn reauth_skip_consent_with_signing(
+    upstream_algorithm: SigningAlgorithm,
+    downstream_algorithm: SigningAlgorithm,
+) {
+    let Some(upstream) = MockOidcProvider::start_with_algorithm(upstream_algorithm).await else {
         return;
     };
     let config = TempReauthConfig::with_reauth_consent(&upstream.issuer, "skip");
+    config.allow_signing_algorithms(&[upstream_algorithm]);
+    crate::common::configure_signing(config.path(), downstream_algorithm);
     let app = AppState::initialize(config.path())
         .expect("re-auth config should initialize")
         .router();
@@ -323,6 +343,7 @@ async fn reauth_flow_can_skip_local_consent() {
         .expect("token response should read");
     let token_json: Value = serde_json::from_slice(&token_body).expect("token should parse");
     let (_, jwks) = get_json(app, "/jwks.json").await;
+    assert_eq!(jwks["keys"][0]["alg"], downstream_algorithm.as_str());
     let claims = verify_jwt_with_jwks(
         token_json["access_token"]
             .as_str()
@@ -358,8 +379,122 @@ async fn invalid_upstream_state_does_not_issue_a_code_or_contact_the_provider() 
     upstream.stop().await;
 }
 
+#[tokio::test]
+async fn es256_upstream_validation_rejects_disallowed_algorithms_bad_signatures_and_claims() {
+    let Some(upstream) = MockOidcProvider::start_with_algorithm(SigningAlgorithm::ES256).await
+    else {
+        return;
+    };
+    let config = TempReauthConfig::new(&upstream.issuer);
+    let state = AppState::initialize(config.path()).unwrap();
+    let mut provider = state.trusted_providers["partner"].clone();
+    let metadata = state.upstream_client.discover(&provider).await.unwrap();
+    let nonce = "expected-nonce";
+    let now = chrono::Utc::now().timestamp();
+    let claims = json!({
+        "iss": upstream.issuer,
+        "aud": provider.client_id,
+        "sub": "user-123",
+        "iat": now,
+        "exp": now + 300,
+        "nonce": nonce,
+    });
+    let sign = |claims: &Value| {
+        encode(
+            &upstream.state.signing_key.header(),
+            claims,
+            &upstream.state.signing_key.encoding_key,
+        )
+        .unwrap()
+    };
+    let token = sign(&claims);
+    let error = state
+        .upstream_client
+        .validate_id_token(&metadata, &provider, &token, nonce)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not allowed"));
+    provider.allowed_signing_algorithms = vec![SigningAlgorithm::ES256];
+    let identity = state
+        .upstream_client
+        .validate_id_token(&metadata, &provider, &token, nonce)
+        .await
+        .unwrap();
+    assert_eq!(identity.subject, "user-123");
+
+    for (field, value) in [
+        ("iss", json!("https://wrong-issuer.example")),
+        ("aud", json!("wrong-client")),
+        ("exp", json!(now - 120)),
+        ("nonce", json!("wrong-nonce")),
+    ] {
+        let mut invalid = claims.clone();
+        invalid[field] = value;
+        assert!(
+            state
+                .upstream_client
+                .validate_id_token(&metadata, &provider, &sign(&invalid), nonce)
+                .await
+                .is_err(),
+            "accepted invalid {field}"
+        );
+    }
+
+    // Same header and signature with a changed payload must fail cryptographic validation.
+    let mut changed_claims = claims.clone();
+    changed_claims["sub"] = json!("attacker");
+    let forged = format!(
+        "{}.{}.{}",
+        token.split('.').next().unwrap(),
+        base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            serde_json::to_vec(&changed_claims).unwrap()
+        ),
+        token.rsplit('.').next().unwrap()
+    );
+    assert!(
+        state
+            .upstream_client
+            .validate_id_token(&metadata, &provider, &forged, nonce)
+            .await
+            .is_err()
+    );
+
+    // A correctly signed ES256 token is still invalid with an incompatible JWKS key.
+    let valid_jwk = serde_json::to_value(&upstream.state.signing_key.jwk).unwrap();
+    for (field, value) in [
+        ("crv", json!("P-384")),
+        ("alg", json!("RS256")),
+        ("kid", json!("unknown-key")),
+        (
+            "x",
+            json!(base64::Engine::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                [0; 32]
+            )),
+        ),
+    ] {
+        let mut invalid = valid_jwk.clone();
+        invalid[field] = value;
+        *upstream.state.jwks_override.lock().unwrap() = Some(json!({"keys": [invalid]}));
+        assert!(
+            state
+                .upstream_client
+                .validate_id_token(&metadata, &provider, &token, nonce)
+                .await
+                .is_err(),
+            "accepted incompatible {field}"
+        );
+    }
+    upstream.stop().await;
+}
+
 impl MockOidcProvider {
     async fn start() -> Option<Self> {
+        Self::start_with_algorithm(SigningAlgorithm::RS256).await
+    }
+
+    async fn start_with_algorithm(algorithm: SigningAlgorithm) -> Option<Self> {
         let std_listener = match StdTcpListener::bind("127.0.0.1:0") {
             Ok(listener) => listener,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return None,
@@ -372,17 +507,14 @@ impl MockOidcProvider {
             .set_nonblocking(true)
             .expect("mock upstream listener should become nonblocking");
         let issuer = format!("http://{addr}");
-        let signing_key = load_signing_key(
-            &fixture_config_dir("config-basic")
-                .join("keys")
-                .join("signing-key.pem"),
-        )
-        .expect("fixture signing key should load");
+        let signing_key = load_signing_key(&crate::common::signing_key_path(algorithm), algorithm)
+            .expect("fixture signing key should load");
         let state = MockOidcState {
             issuer: issuer.clone(),
             signing_key,
             expected_nonce: Arc::new(Mutex::new(None)),
             token_forms: Arc::new(Mutex::new(Vec::new())),
+            jwks_override: Arc::new(Mutex::new(None)),
         };
         let app = Router::new()
             .route("/.well-known/openid-configuration", get(discovery))
@@ -447,6 +579,13 @@ impl Drop for MockOidcProvider {
 }
 
 impl TempReauthConfig {
+    fn allow_signing_algorithms(&self, algorithms: &[SigningAlgorithm]) {
+        let path = self.path.join("trusted_providers.json");
+        let mut providers: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        providers[0]["allowed_signing_algorithms"] = serde_json::to_value(algorithms).unwrap();
+        fs::write(path, serde_json::to_vec_pretty(&providers).unwrap()).unwrap();
+    }
+
     fn new(issuer: &str) -> Self {
         Self::with_reauth_consent(issuer, "local")
     }
@@ -515,7 +654,14 @@ async fn discovery(State(state): State<MockOidcState>) -> Json<Value> {
 }
 
 async fn jwks(State(state): State<MockOidcState>) -> Json<Value> {
-    Json(json!({"keys": [state.signing_key.jwk]}))
+    Json(
+        state
+            .jwks_override
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| json!({"keys": [state.signing_key.jwk]})),
+    )
 }
 
 async fn token(

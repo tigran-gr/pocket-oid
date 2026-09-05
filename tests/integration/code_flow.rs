@@ -452,9 +452,19 @@ async fn invalid_authorize_redirect_uri_is_rejected_before_other_redirectable_er
 
 #[tokio::test]
 async fn completes_code_flow_with_loopback_listener_and_id_token_verification() {
+    code_flow_with_signing(pocket_oid::config::SigningAlgorithm::RS256).await;
+}
+
+#[tokio::test]
+async fn completes_es256_code_flow_with_id_and_access_token_verification() {
+    code_flow_with_signing(pocket_oid::config::SigningAlgorithm::ES256).await;
+}
+
+async fn code_flow_with_signing(algorithm: pocket_oid::config::SigningAlgorithm) {
     let listener = LoopbackListener::start().await;
     let redirect_uri = listener.redirect_uri();
     let config_dir = TempConfigDir::with_loopback_redirect(&redirect_uri);
+    crate::common::configure_signing(config_dir.path(), algorithm);
     let app = AppState::initialize(config_dir.path())
         .expect("app state should initialize")
         .router();
@@ -577,6 +587,18 @@ async fn completes_code_flow_with_loopback_listener_and_id_token_verification() 
     let (_, jwks) = get_json(app, &path_from_url(jwks_uri)).await;
 
     let claims = verify_jwt_with_jwks_for(id_token, &jwks, issuer, "svc-a");
+    assert_eq!(
+        jsonwebtoken::decode_header(id_token).unwrap().alg,
+        algorithm.jwt_algorithm()
+    );
+    let access_token = json["access_token"].as_str().unwrap();
+    assert_eq!(
+        jsonwebtoken::decode_header(access_token).unwrap().alg,
+        algorithm.jwt_algorithm()
+    );
+    let access_claims =
+        verify_jwt_with_jwks_for(access_token, &jwks, issuer, "https://api.example.local");
+    assert_eq!(access_claims["sub"], "user-alice");
     let now = Utc::now().timestamp();
     let issued_at = claims["iat"]
         .as_i64()

@@ -31,6 +31,16 @@ UPSTREAM_CLIENT_SECRET = "upstream-secret"
 UPSTREAM_LOGIN_BACKGROUND_COLOR = "#4f46e5"
 
 
+def _configure_es256(config_dir):
+    provider_path = config_dir / "provider.json"
+    provider = json.loads(provider_path.read_text())
+    provider["signing_algorithm"] = "ES256"
+    provider_path.write_text(json.dumps(provider))
+    (config_dir / "keys" / "signing-key.pem").write_bytes(
+        (FIXTURES / "keys" / "es256.pem").read_bytes()
+    )
+
+
 def _configure_manual_reauth_upstream(
     config_dir, upstream_base_url: str, downstream_base_url: str
 ):
@@ -106,7 +116,16 @@ def _configure_manual_reauth_downstream(
 
 class BlackBoxTests(unittest.TestCase):
     def test_startup_readiness_and_token_flow(self):
-        server = ServerProcess("config-basic")
+        self._assert_startup_readiness_and_token_flow("RS256")
+
+    def test_es256_startup_readiness_and_token_flow(self):
+        self._assert_startup_readiness_and_token_flow("ES256")
+
+    def _assert_startup_readiness_and_token_flow(self, algorithm):
+        server = ServerProcess(
+            "config-basic",
+            configure_config=_configure_es256 if algorithm == "ES256" else None,
+        )
         server.start()
         try:
             discovery_status, discovery = http_get_json(
@@ -114,10 +133,12 @@ class BlackBoxTests(unittest.TestCase):
             )
             self.assertEqual(discovery_status, 200)
             self.assertIn("jwks_uri", discovery)
+            self.assertEqual(discovery["id_token_signing_alg_values_supported"], [algorithm])
 
             jwks_status, jwks = http_get_json(f"{server.base_url}/jwks.json")
             self.assertEqual(jwks_status, 200)
             self.assertTrue(jwks["keys"])
+            self.assertEqual(jwks["keys"][0]["alg"], algorithm)
 
             token_status, token = http_post_form(
                 f"{server.base_url}/oauth/token",
@@ -133,6 +154,7 @@ class BlackBoxTests(unittest.TestCase):
 
             header, claims = decode_jwt_unverified(token["access_token"])
             self.assertIn("kid", header)
+            self.assertEqual(header["alg"], algorithm)
             self.assertEqual(claims["iss"], "https://pocket-oid.local")
             self.assertEqual(claims["sub"], "svc-a")
             self.assertEqual(claims["aud"], "https://api.example.local")

@@ -6,7 +6,7 @@ the root `AGENTS.md`.
 Pocket-OID is a single-crate Rust OpenID Connect provider built with Axum and
 Tokio. It supports client credentials, authorization-code authentication with
 server-rendered login and consent pages, and re-authentication through trusted
-upstream OIDC providers. It issues RS256-signed JWTs and exposes discovery,
+upstream OIDC providers. It issues RS256- or ES256-signed JWTs and exposes discovery,
 JWKS, health, and readiness endpoints.
 
 Use this guide for orientation and working conventions. Verify implementation
@@ -38,7 +38,7 @@ Source layout:
   and ID-token validation against upstream JWKS.
 - `src/frontend.rs`: server-rendered login and consent HTML.
 - `src/token.rs`: access-token template substitution and required claims.
-- `src/crypto.rs`: RSA signing-key loading, `kid`, and public JWKS material.
+- `src/crypto.rs`: RSA/P-256 signing-key loading, `kid`, and public JWKS material.
 - `src/error.rs`: application and API errors.
 
 ## Toolchain and running the service
@@ -90,6 +90,13 @@ A local client must not define `re_auth`. A re-auth client must define it;
 its consent behavior is controlled by `re_auth.consent`, not `consent_mode`.
 Keep `token_template.json`'s `iss` aligned with the configured provider issuer.
 The checked-in credentials and signing keys are development fixtures.
+
+`provider.json` selects `signing_algorithm` (`RS256` by default, or `ES256`).
+Both use an unencrypted PKCS#8 `keys/signing-key.pem`; ES256 requires P-256.
+Discovery and JWKS describe only the active signing algorithm and key.
+Trusted providers separately set `allowed_signing_algorithms`, defaulting to
+`["RS256"]`; ES256 upstream validation must be explicitly enabled. Preserve
+algorithm, key-type, curve, and key-usage checks when extending verification.
 
 Invalid configuration intentionally fails at startup. The fixture
 `tests/fixtures/config-invalid-clients/` exercises this behavior; use

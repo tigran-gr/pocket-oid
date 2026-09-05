@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use reqwest::redirect::Policy;
 use serde::Deserialize;
@@ -68,6 +69,71 @@ struct RemoteJwk {
     kid: Option<String>,
     n: Option<String>,
     e: Option<String>,
+    crv: Option<String>,
+    x: Option<String>,
+    y: Option<String>,
+    key_ops: Option<Vec<String>>,
+}
+
+impl RemoteJwk {
+    fn decoding_key(&self, algorithm: Algorithm) -> anyhow::Result<DecodingKey> {
+        let algorithm_name = match algorithm {
+            Algorithm::RS256 => "RS256",
+            Algorithm::ES256 => "ES256",
+            _ => bail!("unsupported upstream signing algorithm"),
+        };
+        if !matches!(self.key_use.as_deref(), None | Some("sig"))
+            || self.alg.as_deref().is_some_and(|alg| alg != algorithm_name)
+            || self
+                .key_ops
+                .as_ref()
+                .is_some_and(|ops| !ops.iter().any(|op| op == "verify"))
+        {
+            bail!("upstream JWKS key is not a {algorithm_name} verification key");
+        }
+        match algorithm {
+            Algorithm::RS256 => {
+                if self.kty.as_deref() != Some("RSA") {
+                    bail!("upstream RS256 key must have kty RSA");
+                }
+                let modulus = self
+                    .n
+                    .as_deref()
+                    .context("upstream JWKS key is missing modulus")?;
+                let exponent = self
+                    .e
+                    .as_deref()
+                    .context("upstream JWKS key is missing exponent")?;
+                DecodingKey::from_rsa_components(modulus, exponent)
+                    .context("upstream RSA JWKS key is invalid")
+            }
+            Algorithm::ES256 => {
+                if self.kty.as_deref() != Some("EC") || self.crv.as_deref() != Some("P-256") {
+                    bail!("upstream ES256 key must have kty EC and crv P-256");
+                }
+                let x = self
+                    .x
+                    .as_deref()
+                    .context("upstream EC JWKS key is missing x")?;
+                let y = self
+                    .y
+                    .as_deref()
+                    .context("upstream EC JWKS key is missing y")?;
+                for coordinate in [x, y] {
+                    if URL_SAFE_NO_PAD
+                        .decode(coordinate)
+                        .context("upstream EC JWKS coordinate is invalid base64url")?
+                        .len()
+                        != 32
+                    {
+                        bail!("upstream P-256 JWKS coordinates must each be 32 bytes");
+                    }
+                }
+                DecodingKey::from_ec_components(x, y).context("upstream EC JWKS key is invalid")
+            }
+            _ => unreachable!("unsupported algorithms were rejected above"),
+        }
+    }
 }
 
 impl UpstreamClient {
@@ -198,8 +264,12 @@ impl UpstreamClient {
         expected_nonce: &str,
     ) -> anyhow::Result<ValidatedUpstreamIdentity> {
         let header = decode_header(id_token).context("upstream id_token has an invalid header")?;
-        if header.alg != Algorithm::RS256 {
-            bail!("upstream id_token must use RS256");
+        if !provider
+            .allowed_signing_algorithms
+            .iter()
+            .any(|alg| alg.jwt_algorithm() == header.alg)
+        {
+            bail!("upstream id_token signing algorithm is not allowed for this provider");
         }
         let kid = header
             .kid
@@ -210,18 +280,9 @@ impl UpstreamClient {
             .into_iter()
             .find(|key| key.kid.as_deref() == Some(kid.as_str()))
             .context("upstream id_token kid was not found in JWKS")?;
-        if jwk.kty.as_deref() != Some("RSA")
-            || !matches!(jwk.key_use.as_deref(), None | Some("sig"))
-            || !matches!(jwk.alg.as_deref(), None | Some("RS256"))
-        {
-            bail!("upstream JWKS key is not an RS256 signing key");
-        }
-        let modulus = jwk.n.context("upstream JWKS key is missing modulus")?;
-        let exponent = jwk.e.context("upstream JWKS key is missing exponent")?;
-        let decoding_key = DecodingKey::from_rsa_components(&modulus, &exponent)
-            .context("upstream JWKS key is invalid")?;
+        let decoding_key = jwk.decoding_key(header.alg)?;
 
-        let mut validation = Validation::new(Algorithm::RS256);
+        let mut validation = Validation::new(header.alg);
         validation.leeway = CLOCK_SKEW_SECONDS as u64;
         validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
         validation.set_issuer(&[&metadata.issuer]);
@@ -312,6 +373,57 @@ mod tests {
     use crate::config::{TokenEndpointAuthMethod, TrustedProviderConfig, TrustedProviderType};
 
     #[test]
+    fn es256_jwks_enforces_curve_algorithm_usage_and_coordinate_encoding() {
+        use super::RemoteJwk;
+        use crate::{config::SigningAlgorithm, crypto::load_signing_key};
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        use jsonwebtoken::Algorithm;
+        use serde_json::{Value, json};
+        let key = load_signing_key(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/keys/es256.pem"),
+            SigningAlgorithm::ES256,
+        )
+        .unwrap();
+        let valid = serde_json::to_value(key.jwk).unwrap();
+        let parse = |value: Value| serde_json::from_value::<RemoteJwk>(value).unwrap();
+        assert!(parse(valid.clone()).decoding_key(Algorithm::ES256).is_ok());
+        assert!(parse(valid.clone()).decoding_key(Algorithm::RS256).is_err());
+        assert!(parse(valid.clone()).decoding_key(Algorithm::HS256).is_err());
+        for (field, value) in [
+            ("kty", json!("RSA")),
+            ("crv", json!("P-384")),
+            ("crv", Value::Null),
+            ("alg", json!("RS256")),
+            ("use", json!("enc")),
+            ("key_ops", json!(["sign"])),
+            ("key_ops", json!([])),
+            ("x", Value::Null),
+            ("y", Value::Null),
+            ("x", json!("invalid!")),
+            ("y", json!("")),
+            ("x", json!(URL_SAFE_NO_PAD.encode([0; 31]))),
+            ("y", json!(URL_SAFE_NO_PAD.encode([0; 33]))),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(
+                parse(invalid).decoding_key(Algorithm::ES256).is_err(),
+                "accepted invalid {field}"
+            );
+        }
+        // alg/use/key_ops are optional JWK metadata; kty and crv remain mandatory.
+        let mut optional_metadata = valid;
+        optional_metadata.as_object_mut().unwrap().remove("alg");
+        optional_metadata.as_object_mut().unwrap().remove("use");
+        optional_metadata["key_ops"] = json!(["verify"]);
+        assert!(
+            parse(optional_metadata)
+                .decoding_key(Algorithm::ES256)
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn authorization_url_contains_oidc_and_pkce_parameters() {
         let client = UpstreamClient::new().expect("HTTP client should initialize");
         let provider = TrustedProviderConfig {
@@ -323,6 +435,7 @@ mod tests {
             redirect_uri: "https://pocket.example.test/reauth/callback/partner".to_string(),
             token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretPost,
             require_pkce: true,
+            allowed_signing_algorithms: vec![crate::config::SigningAlgorithm::RS256],
         };
         let metadata = DiscoveredOidcProvider {
             issuer: provider.issuer.clone(),

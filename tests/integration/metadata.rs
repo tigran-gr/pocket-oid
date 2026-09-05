@@ -18,6 +18,10 @@ async fn serves_openid_configuration() {
         "https://pocket-oid.local/oauth/token"
     );
     assert_eq!(body["jwks_uri"], "https://pocket-oid.local/jwks.json");
+    assert_eq!(
+        body["id_token_signing_alg_values_supported"],
+        serde_json::json!(["RS256"])
+    );
 }
 
 #[tokio::test]
@@ -32,4 +36,7 @@ async fn serves_jwks_with_required_fields() {
     assert_eq!(first_key["alg"], "RS256");
     assert!(first_key["n"].as_str().is_some());
     assert!(first_key["e"].as_str().is_some());
+    assert!(first_key.get("crv").is_none());
+    assert!(first_key.get("x").is_none());
+    assert!(first_key.get("y").is_none());
 }

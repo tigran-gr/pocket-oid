@@ -1,6 +1,6 @@
 # pocket-oid
 
-`pocket-oid` is a small OpenID Connect provider. It issues RS256-signed JWTs
+`pocket-oid` is a small OpenID Connect provider. It issues RS256- or ES256-signed JWTs
 for the client-credentials and authorization-code flows and exposes discovery,
 JWKS, health, and readiness endpoints. It also supports OIDC identity brokering
 through its re-authentication (`re_auth`) mode.
@@ -85,6 +85,35 @@ The checked-in `config/` directory contains development credentials and keys;
 replace them before any non-local deployment. Protect the signing key and client
 secrets with appropriate filesystem permissions.
 
+### Token signing
+
+`provider.json` accepts `signing_algorithm`: `"RS256"` (the default) or `"ES256"`.
+The selected algorithm signs both access tokens and ID tokens. Discovery advertises
+that algorithm, and `/jwks.json` publishes its matching public key.
+
+For ES256, set this field in `provider.json`:
+
+```json
+"signing_algorithm": "ES256"
+```
+
+Generate an unencrypted PKCS#8 PEM private key on the P-256 curve:
+
+```sh
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out es256-key.pem
+```
+
+Install that key as `keys/signing-key.pem` in the selected configuration directory
+and restart the service. The EC JWK contains `kty: "EC"`, `crv: "P-256"`, and
+base64url-encoded `x` and `y` coordinates. ES256 signatures use the standard JWT
+64-byte format. Other curves, SEC1 (`EC PRIVATE KEY`) files, and keys that do not
+match the configured algorithm are rejected at startup. RS256 continues to use
+an unencrypted PKCS#8 RSA private key.
+
+One signing key and algorithm are active at a time. Replacing the key immediately
+changes the published JWKS after restart; old verification keys are not retained.
+Coordinate a change with token consumers and the lifetime of previously issued tokens.
+
 ## Re-authentication (identity brokering)
 
 Re-auth lets an application use accounts from a trusted upstream OIDC provider,
@@ -113,6 +142,19 @@ callback URI with the upstream provider. Pocket-OID discovers upstream endpoints
 through the issuer's `/.well-known/openid-configuration`. See the
 [re-auth configuration example](plans/re-auth-client-type-plan.md#3-configuration-model)
 for the complete client and provider entries.
+
+Upstream ID tokens use a separate algorithm policy. Each entry in
+`trusted_providers.json` can set `allowed_signing_algorithms`, which defaults to
+`["RS256"]`. For an ES256 upstream, configure:
+
+```json
+"allowed_signing_algorithms": ["ES256"]
+```
+
+Use `["RS256", "ES256"]` when that upstream needs both. The list must be nonempty;
+other algorithms are rejected. The token's algorithm must be allowed and match
+its JWKS key type, curve, and any declared algorithm or verification usage.
+This setting is independent of Pocket-OID's own `signing_algorithm`.
 
 Local consent is shown by default; `re_auth.consent: "skip"` omits that screen.
 This setting is separate from `consent_mode`, which controls consent for local

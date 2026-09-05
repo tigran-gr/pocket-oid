@@ -56,7 +56,7 @@ impl AppState {
     pub fn initialize(config_dir: &Path) -> Result<Self, AppError> {
         let config = LoadedConfig::load_from_directory(config_dir)
             .map_err(|err| AppError::Config(format!("failed to load configuration: {err}")))?;
-        let signing_key = load_signing_key(&config.key_path())?;
+        let signing_key = load_signing_key(&config.key_path(), config.provider.signing_algorithm)?;
         let jwk_set = JwkSet {
             keys: vec![signing_key.jwk.clone()],
         };
@@ -130,7 +130,9 @@ impl DiscoveryDocument {
             response_types_supported: vec!["code".to_string(), "token".to_string()],
             subject_types_supported: vec!["public".to_string()],
             token_endpoint_auth_methods_supported: vec!["client_secret_post".to_string()],
-            id_token_signing_alg_values_supported: vec!["RS256".to_string()],
+            id_token_signing_alg_values_supported: vec![
+                provider.signing_algorithm.as_str().to_string(),
+            ],
             scopes_supported: scopes_supported.to_vec(),
         }
     }
