@@ -15,6 +15,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures"
+KEYCLOAK_TOOLS = ROOT / "tools" / "keycloak"
+KEYCLOAK_REALM_FIXTURE = (
+    ROOT / "tests_blackbox" / "keycloak" / "pocket-oid-realm-realm.json"
+)
 
 
 def _pick_free_port() -> int:
@@ -77,6 +81,24 @@ def http_post_form(url: str, form: dict):
     return status, json.loads(body)
 
 
+def http_json_request(
+    url: str, method: str, payload=None, headers: dict | None = None
+):
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request_headers = dict(headers or {})
+    if payload is not None:
+        request_headers["content-type"] = "application/json"
+    req = urllib.request.Request(url, method=method, data=data, headers=request_headers)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            body = response.read().decode("utf-8")
+            return response.status, json.loads(body) if body else None
+    except urllib.error.HTTPError as err:
+        body = err.read().decode("utf-8")
+        err.close()
+        return err.code, json.loads(body) if body else None
+
+
 def decode_jwt_unverified(token: str):
     parts = token.split(".")
     if len(parts) != 3:
@@ -110,12 +132,15 @@ def authorize_path(
     nonce: str,
     code_challenge: str | None = None,
     code_challenge_method: str | None = None,
+    client_id: str = "svc-a",
+    scope: str = "openid default",
+    prompt: str | None = None,
 ) -> str:
     params = [
         ("response_type", "code"),
-        ("client_id", "svc-a"),
+        ("client_id", client_id),
         ("redirect_uri", redirect_uri),
-        ("scope", "openid default"),
+        ("scope", scope),
         ("state", state),
         ("nonce", nonce),
     ]
@@ -123,6 +148,8 @@ def authorize_path(
         params.append(("code_challenge", code_challenge))
     if code_challenge_method is not None:
         params.append(("code_challenge_method", code_challenge_method))
+    if prompt is not None:
+        params.append(("prompt", prompt))
     query = "&".join(f"{key}={value.replace(' ', '%20')}" for key, value in params)
     return f"/authorize?{query}"
 
@@ -140,6 +167,22 @@ def enable_openid_scope(
     if require_pkce:
         client["require_pkce"] = True
     clients_path.write_text(json.dumps(clients))
+
+
+def configure_provider_settings(
+    config_dir: Path, name: str, issuer: str, background_color=None
+):
+    provider_path = config_dir / "provider.json"
+    provider = json.loads(provider_path.read_text())
+    provider["name"] = name
+    provider["issuer"] = issuer
+    provider["login_background_color"] = background_color
+    provider_path.write_text(json.dumps(provider))
+
+    template_path = config_dir / "token_template.json"
+    template = json.loads(template_path.read_text())
+    template["iss"] = issuer
+    template_path.write_text(json.dumps(template))
 
 
 class CodeFlowCallback:
@@ -250,14 +293,15 @@ class ServerProcess:
         self.configure_config = configure_config
         self.process = None
         self.config_dir = None
-        self.base_url = None
+        self.port = _pick_free_port()
+        self.base_url = f"http://127.0.0.1:{self.port}"
 
     def start(self):
         source_dir = FIXTURES / self.fixture_name
         self.config_dir = Path(tempfile.mkdtemp(prefix="pocket-oid-test-"))
         shutil.copytree(source_dir, self.config_dir, dirs_exist_ok=True)
 
-        port = _pick_free_port()
+        port = self.port
         provider_path = self.config_dir / "provider.json"
         provider = json.loads(provider_path.read_text())
         provider["listen"] = f"127.0.0.1:{port}"
@@ -269,7 +313,6 @@ class ServerProcess:
 
         env = os.environ.copy()
         env["POCKET_OID_CONFIG_DIR"] = str(self.config_dir)
-        self.base_url = f"http://127.0.0.1:{port}"
         self.process = subprocess.Popen(
             ["cargo", "run", "--quiet"],
             cwd=ROOT,
@@ -301,3 +344,176 @@ class ServerProcess:
                 self.process.kill()
         if self.config_dir is not None:
             shutil.rmtree(self.config_dir, ignore_errors=True)
+
+
+class KeycloakProcess:
+    def __init__(self, realm_name: str, realm_fixture: Path = KEYCLOAK_REALM_FIXTURE):
+        self.realm_name = realm_name
+        self.realm_fixture = realm_fixture
+        self.port = _pick_free_port()
+        self.base_url = f"http://127.0.0.1:{self.port}"
+        self.issuer = f"{self.base_url}/realms/{self.realm_name}"
+        self.admin_username = "pocket-oid-test-admin"
+        self.admin_password = "pocket-oid-test-admin-password"
+        self.process = None
+        self.run_dir = None
+        self.home_dir = None
+        self.log_path = None
+        self.log_file = None
+
+    @property
+    def discovery_url(self) -> str:
+        return f"{self.issuer}/.well-known/openid-configuration"
+
+    def start(self):
+        self._require_java()
+        install_dir = self._ensure_installation()
+        if not self.realm_fixture.is_file():
+            raise AssertionError(f"Keycloak realm fixture is missing: {self.realm_fixture}")
+
+        self.run_dir = Path(tempfile.mkdtemp(prefix="pocket-oid-keycloak-test-"))
+        self.home_dir = self.run_dir / install_dir.name
+        shutil.copytree(
+            install_dir,
+            self.home_dir,
+            ignore=shutil.ignore_patterns("data"),
+        )
+        import_dir = self.home_dir / "data" / "import"
+        import_dir.mkdir(parents=True)
+        shutil.copy2(self.realm_fixture, import_dir / f"{self.realm_name}-realm.json")
+
+        self.log_path = self.run_dir / "keycloak.log"
+        self.log_file = self.log_path.open("w", encoding="utf-8")
+        env = os.environ.copy()
+        env["KC_BOOTSTRAP_ADMIN_USERNAME"] = self.admin_username
+        env["KC_BOOTSTRAP_ADMIN_PASSWORD"] = self.admin_password
+        command = [
+            str(self.home_dir / "bin" / "kc.sh"),
+            "start-dev",
+            "--import-realm",
+            "--db=dev-file",
+            "--http-host=127.0.0.1",
+            f"--http-port={self.port}",
+            f"--hostname={self.base_url}",
+        ]
+        print(f"Starting Keycloak on port {self.port}")
+        self.process = subprocess.Popen(
+            command,
+            cwd=self.home_dir,
+            env=env,
+            stdout=self.log_file,
+            stderr=subprocess.STDOUT,
+        )
+
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            if self.process.poll() is not None:
+                self._raise_startup_error("Keycloak exited before becoming ready")
+            try:
+                status, discovery = http_get_json(self.discovery_url)
+                if status == 200:
+                    if discovery.get("issuer") != self.issuer:
+                        self._raise_startup_error(
+                            "Keycloak discovery issuer did not match the configured issuer"
+                        )
+                    return
+            except Exception:
+                time.sleep(0.5)
+
+        self._raise_startup_error("Keycloak did not become ready before timeout")
+
+    def configure_client_redirect_uri(self, client_id: str, redirect_uri: str):
+        token_status, token = http_post_form(
+            f"{self.base_url}/realms/master/protocol/openid-connect/token",
+            {
+                "grant_type": "password",
+                "client_id": "admin-cli",
+                "username": self.admin_username,
+                "password": self.admin_password,
+            },
+        )
+        if token_status != 200 or "access_token" not in token:
+            raise AssertionError(
+                f"failed to obtain Keycloak admin token (HTTP {token_status}): {token}"
+            )
+        headers = {"authorization": f"Bearer {token['access_token']}"}
+        query = urllib.parse.urlencode({"clientId": client_id})
+        clients_url = f"{self.base_url}/admin/realms/{self.realm_name}/clients?{query}"
+        clients_status, clients = http_json_request(clients_url, "GET", headers=headers)
+        if clients_status != 200 or not isinstance(clients, list):
+            raise AssertionError(
+                f"failed to find Keycloak client {client_id!r} (HTTP {clients_status}): {clients}"
+            )
+        matches = [client for client in clients if client.get("clientId") == client_id]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"expected exactly one Keycloak client {client_id!r}, found {len(matches)}"
+            )
+        client = matches[0]
+        client["redirectUris"] = [redirect_uri]
+        update_url = f"{self.base_url}/admin/realms/{self.realm_name}/clients/{client['id']}"
+        update_status, update_body = http_json_request(
+            update_url, "PUT", payload=client, headers=headers
+        )
+        if update_status != 204:
+            raise AssertionError(
+                f"failed to set Keycloak redirect URI (HTTP {update_status}): {update_body}"
+            )
+
+    def stop(self):
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+        if self.log_file is not None:
+            self.log_file.close()
+        if self.run_dir is not None:
+            shutil.rmtree(self.run_dir, ignore_errors=True)
+
+    def _ensure_installation(self) -> Path:
+        ensure_script = KEYCLOAK_TOOLS / "ensure-keycloak.sh"
+        result = subprocess.run(
+            [str(ensure_script)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                "failed to prepare the Keycloak standalone distribution:\n"
+                f"{result.stderr.strip()}"
+            )
+        install_dir = Path(result.stdout.strip())
+        if not (install_dir / "bin" / "kc.sh").is_file():
+            raise AssertionError(
+                f"Keycloak helper returned an invalid installation directory: {install_dir}"
+            )
+        return install_dir
+
+    @staticmethod
+    def _require_java():
+        java_path = shutil.which("java")
+        if java_path is None:
+            raise AssertionError(
+                "Keycloak requires a compatible Java runtime on PATH; install one before "
+                "running POCKET_OID_MANUAL_KEYCLOAK_REAUTH=1."
+            )
+        java_version = subprocess.run(
+            [java_path, "-version"], capture_output=True, text=True, timeout=10
+        )
+        if java_version.returncode != 0:
+            raise AssertionError(
+                "Keycloak requires a compatible Java runtime on PATH; `java -version` "
+                "did not succeed."
+            )
+
+    def _raise_startup_error(self, message: str):
+        log_tail = ""
+        if self.log_path is not None and self.log_path.exists():
+            log_tail = self.log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+        self.stop()
+        detail = f"\nKeycloak log tail:\n{log_tail}" if log_tail else ""
+        raise AssertionError(f"{message}{detail}")

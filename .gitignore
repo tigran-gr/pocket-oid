@@ -1,2 +1,14 @@
 target/
 **/*.rs.bk
+
+# Python bytecode and virtual environment
+__pycache__/
+*.py[cod]
+.venv/
+
+# macOS metadata
+.DS_Store
+
+# Downloaded by tools/keycloak/ensure-keycloak.sh; the helper and its VERSION stay tracked.
+/tools/keycloak/archive/
+/tools/keycloak/dist/

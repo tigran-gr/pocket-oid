@@ -10,6 +10,10 @@ async fn serves_openid_configuration() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["issuer"], "https://pocket-oid.local");
     assert_eq!(
+        body["authorization_endpoint"],
+        "https://pocket-oid.local/authorize"
+    );
+    assert_eq!(
         body["token_endpoint"],
         "https://pocket-oid.local/oauth/token"
     );

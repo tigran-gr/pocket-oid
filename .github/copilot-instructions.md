@@ -1,112 +1,182 @@
-# Copilot Instructions
+# Shared Agent Instructions
 
-Pocket-OID is a small single-crate Rust service that implements a minimal OpenID Connect provider for the client credentials flow only. It serves discovery metadata, JWKS, token issuance, and health/readiness endpoints. The repo is intentionally compact: about 36 tracked source/config files, mostly Rust plus JSON fixtures and one Python smoke test. There is no database, no frontend, no Dockerfile, no Makefile/justfile, and no checked-in GitHub Actions workflow yet.
+This file provides repository guidance for Copilot and agents directed here by
+the root `AGENTS.md`.
 
-Trust these instructions first and only search when they are incomplete or proven wrong.
+Pocket-OID is a single-crate Rust OpenID Connect provider built with Axum and
+Tokio. It supports client credentials, authorization-code authentication with
+server-rendered login and consent pages, and re-authentication through trusted
+upstream OIDC providers. It issues RS256-signed JWTs and exposes discovery,
+JWKS, health, and readiness endpoints.
 
-## Toolchain and bootstrap
+Use this guide for orientation and working conventions. Verify implementation
+details against current code and tests, and update stale guidance when behavior
+changes.
 
-Validated locally on March 18, 2026:
-- `rustc 1.94.0`
-- `cargo 1.94.0`
-- `python3 3.14.3`
+## Documentation and architecture
 
-There is no `rust-toolchain.toml`, so use the installed toolchain. `cargo fmt` and `cargo clippy` were available and worked. Always run commands from the repo root.
+- [README.md](../README.md): running the service, configuration, login background
+  customization, and endpoint usage.
+- [Black-box test guide](../tests_blackbox/README.md): automated and opt-in
+  browser tests, commands, and prerequisites.
+- [Re-auth plan](../plans/re-auth-client-type-plan.md): settled product decisions
+  and design context. Plans also contain future proposals; confirm whether a
+  feature exists in code before treating a proposal as implemented.
+- [Original provider plan](../provider-plan.md): historical design context.
 
-Cold-start validation from a clean tree was:
+Source layout:
 
-```bash
-cargo clean
-cargo test
-cargo fmt -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo build --release
-```
+- `Cargo.toml`: Rust edition and dependency declarations.
+- `src/main.rs`: CLI help/version, tracing, configuration selection, and listener.
+- `src/app.rs`: shared application state, startup wiring, routes, and discovery.
+- `src/config.rs`: config loading, schema and semantic validation, local users,
+  registered clients, and trusted providers.
+- `src/handlers.rs`: token exchange, authorization, local login/consent,
+  re-auth callback/consent, and metadata/health handlers.
+- `src/auth.rs`: in-memory sessions, authorization codes, and pending re-auth
+  and consent transactions. This state is lost on process restart.
+- `src/upstream.rs`: OIDC discovery, upstream authorization URLs, code exchange,
+  and ID-token validation against upstream JWKS.
+- `src/frontend.rs`: server-rendered login and consent HTML.
+- `src/token.rs`: access-token template substitution and required claims.
+- `src/crypto.rs`: RSA signing-key loading, `kid`, and public JWKS material.
+- `src/error.rs`: application and API errors.
 
-Observed timings from a cold run:
-- `cargo test`: passed in about 18s and is the best bootstrap command because it compiles the crate and runs all Rust tests.
-- `cargo fmt -- --check`: passed in under 1s.
-- `cargo clippy --all-targets --all-features -- -D warnings`: passed in about 6s.
-- `cargo build --release`: passed in about 19s.
+## Toolchain and running the service
 
-Recommended pre-PR sequence:
+Run commands from the repository root. Use the installed Rust toolchain; there
+is currently no `rust-toolchain.toml`. Python tests use Python 3 and `unittest`.
+Use `cargo build --release` when a release binary is needed. Reserve
+`cargo clean` for troubleshooting that requires rebuilding cached artifacts.
 
-```bash
-cargo fmt -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-```
+Start the development configuration with `cargo run --quiet`. It uses `./config`
+relative to the working directory and listens on `127.0.0.1:8080` with the
+checked-in settings. Check readiness at `/readyz`. For CLI help, use
+`cargo run -- --help`.
 
-Always run `cargo test` before assuming a code change is safe; this repo has meaningful in-process coverage.
+Select another configuration with:
 
-## Run and runtime config
-
-`cargo run --quiet` starts the server with the checked-in `config/` directory by default. That config binds `127.0.0.1:8080`; `/readyz` returned `200 OK` when validated locally.
-
-Use `POCKET_OID_CONFIG_DIR` to point the binary at another config directory:
-
-```bash
+```sh
 POCKET_OID_CONFIG_DIR=tests/fixtures/config-basic cargo run --quiet
 ```
 
-That environment variable is the main runtime switch in this repo and is also how the Python black-box test selects alternate configs.
+The server is a long-lived process; stop any instances started for verification.
+A bind failure may mean the configured port is already occupied.
 
-A valid config directory must contain:
+## Runtime configuration
+
+A configuration directory must contain:
+
 - `provider.json`
 - `clients.json`
+- `users.json`
 - `token_template.json`
 - `keys/signing-key.pem`
 
-Fail-fast startup with invalid config is intentional and already tested. This command exited non-zero in about 0.6s with a schema-validation error:
+The loader requires at least one enabled client and at least one local user,
+including for setups that use only re-auth clients. `trusted_providers.json` is
+optional when no re-auth clients are configured. Every re-auth client must
+reference a provider defined in that file and include `openid` in its upstream
+scopes. Provider credentials belong in the trusted-provider definition.
 
-```bash
-env POCKET_OID_CONFIG_DIR=tests/fixtures/config-invalid-clients cargo run --quiet
+Client authentication and consent settings:
+
+| Setting | Values and behavior |
+| --- | --- |
+| `auth_mode` | `local` (default) or `re_auth`; selects the authentication flow. |
+| `consent_mode` | `always` (default) or `skip`; controls local-authentication consent. |
+| `re_auth.consent` | `local` (default) or `skip`; controls consent after upstream authentication. |
+
+A local client must not define `re_auth`. A re-auth client must define it;
+its consent behavior is controlled by `re_auth.consent`, not `consent_mode`.
+Keep `token_template.json`'s `iss` aligned with the configured provider issuer.
+The checked-in credentials and signing keys are development fixtures.
+
+Invalid configuration intentionally fails at startup. The fixture
+`tests/fixtures/config-invalid-clients/` exercises this behavior; use
+`tests/fixtures/config-basic/` as the base for valid test configurations.
+
+## Re-auth decisions to preserve
+
+- Authentication routing and consent policy come from registered client
+  configuration. An `/authorize` query parameter cannot override `auth_mode`.
+- Resolve upstream endpoints through the issuer's
+  `/.well-known/openid-configuration`; require the discovered issuer to match
+  the configured issuer exactly.
+- Validate upstream state, nonce, signature, issuer, audience, and token timing
+  before issuing a downstream code. Preserve PKCE checks, expiration, and the
+  single-use, provider-bound pending transaction behavior.
+- Map the validated upstream subject to `{provider_id}:{upstream_sub}`.
+  Pocket-OID issues its own downstream codes and tokens.
+- Do not embed upstream token strings or entire upstream token payloads in
+  downstream tokens. Claim propagation and refresh-token support remain deferred.
+- Re-auth uses local consent by default. The Keycloak manual test explicitly
+  sets `re_auth.consent: "skip"` in its temporary client configuration; the
+  Pocket-OID-to-Pocket-OID manual test exercises local consent.
+
+## Verification
+
+For Rust code changes, run:
+
+```sh
+cargo fmt -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
 ```
 
-Common failure modes:
-- Port `127.0.0.1:8080` may already be in use when you run the default config.
-- Live socket tests can fail in restricted sandboxes with `PermissionError: [Errno 1] Operation not permitted` when binding `127.0.0.1`; treat that as an environment restriction before changing code.
-- `cargo run --quiet` is a long-lived server process; stop it manually after smoke testing.
+Unit tests live alongside source modules. Integration tests under
+`tests/integration/` cover metadata, health, tokens, authorization codes, PKCE,
+consent, and re-auth. Shared Rust helpers live in `tests/common/mod.rs`.
 
-## Tests
+For Python test-harness changes or changes affecting process startup and HTTP
+flows, run the ordinary black-box suite using `unittest`:
 
-Rust tests are the default validation layer and should stay green under `cargo test`:
-- 3 unit/internal endpoint tests live in `src/handlers.rs`.
-- 9 integration tests live under `tests/`.
-
-The process-level smoke test is:
-
-```bash
-python3 -m unittest tests_blackbox.test_server_blackbox -v
+```sh
+python3 -m unittest discover -s tests_blackbox -v
 ```
 
-That passed in about 1.3s once localhost binding was allowed. Do not default to `pytest`: the planning doc mentions it, but `pytest` is not installed here and `python3 -m pytest --version` failed with `No module named pytest`. The existing Python test uses only the standard library `unittest`.
+Run ordinary discovery with the browser opt-in flags unset. Selenium and manual
+tests are skipped by default; ordinary tests use Python's standard library.
+The shared `tests_blackbox/blackbox_support.py` creates temporary fixture copies,
+allocates loopback ports, starts processes, and handles callback token exchange.
+Use these helpers when extending the tests.
 
-## Layout and architecture
+Loopback restrictions affect coverage: Python tests can fail with
+`PermissionError`, and the Rust mock-provider helper in
+`tests/integration/reauth.rs` returns early if binding is denied. Some code-flow
+tests also fall back to in-process dispatch. A green run in a restricted sandbox
+does not prove that live HTTP paths ran. For changes to those paths, verify in
+an environment that permits loopback listeners and report any coverage gaps.
 
-Important files to open first:
-- `Cargo.toml`: single package `pocket-oid`, Rust edition 2024, Axum/Tokio server.
-- `src/main.rs`: process entrypoint, tracing init, reads `POCKET_OID_CONFIG_DIR`, binds the listener.
-- `src/app.rs`: `AppState`, startup wiring, router construction, discovery metadata assembly.
-- `src/config.rs`: loads `provider.json`, `clients.json`, `token_template.json`; validates client config with `schemars` + `jsonschema`; resolves key paths.
-- `src/handlers.rs`: `/oauth/token`, `/.well-known/openid-configuration`, `/jwks.json`, `/healthz`, `/readyz`; client auth and scope validation.
-- `src/token.rs`: placeholder substitution for token templates and required claim enforcement.
-- `src/crypto.rs`: loads RSA signing key, computes `kid`, exposes JWKS material.
-- `src/error.rs`: app and API errors.
+For documentation-only or ignore-rule changes, check links, paths, examples,
+or ignore behavior as appropriate and run `git diff --check`; a full runtime
+suite is unnecessary. Report which checks ran and which were skipped.
 
-Test/layout files:
-- `config/`: default runtime config used by `cargo run`.
-- `tests/fixtures/config-basic/`: stable valid fixture config.
-- `tests/fixtures/config-invalid-clients/`: intentionally invalid startup fixture.
-- `tests/common/mod.rs`: shared helpers for integration tests.
-- `tests/integration/*.rs`: discovery, health, token success, parallel request, and OAuth error-path coverage.
-- `tests_blackbox/test_server_blackbox.py`: launches `cargo run --quiet`, rewrites copied fixture config to a free port, and verifies both successful startup and expected startup failure.
+## Browser tests and Keycloak
+
+Use the [black-box test guide](../tests_blackbox/README.md) for browser commands.
+Opt-in flags select distinct tests:
+
+- `POCKET_OID_MANUAL_CODE_FLOW=1`: manual local authorization-code flow.
+- `POCKET_OID_MANUAL_REAUTH=1`: manual flow with another Pocket-OID upstream.
+- `POCKET_OID_MANUAL_KEYCLOAK_REAUTH=1`: manual flow with a Keycloak upstream.
+- `POCKET_OID_SELENIUM_CODE_FLOW=1`: automated browser flow; requires the
+  dependencies in `tests_blackbox/requirements-selenium.txt` and a browser.
+
+Manual tests open a browser and wait for user interaction. Keycloak additionally
+requires a compatible Java runtime on `PATH`. Its pinned distribution version
+comes from `tools/keycloak/VERSION`; `tools/keycloak/ensure-keycloak.sh` downloads
+it only when missing. Downloaded archives and distributions are ignored by Git;
+the helper, version file, and realm fixture belong in the repository.
+
+`KeycloakProcess` runs a fresh temporary copy, imports the realm, and registers
+the exact callback URI allocated for that test. Keep runtime state in that
+temporary copy. Keycloak import filenames must match `<realm>-realm.json`;
+the helper derives that runtime filename from the realm name.
 
 ## UI design notes
 
-The login page in `src/frontend.rs` should stay modern, practical, and minimal. It is a server-rendered auth surface centered around a compact white panel, teal accents, clear labels, accessible error messaging, and responsive spacing. Preserve the existing form behavior (`POST /login`, hidden `return_to`, username/password autocomplete) and keep the visual language restrained rather than marketing-heavy.
-
-Repository notes that save time:
-- `README.md` is only a one-line summary; most useful repo knowledge is in the code.
-- `plans/` and `provider-plan.md` are forward-looking planning docs, not the current source of truth. They mention proposed CI and future authorization-code-flow work; do not assume either exists in the current implementation.
-- There is currently no `.github/workflows/` directory. Replicate CI locally with the `fmt` + `clippy` + `test` sequence above.
+Keep login and consent pages minimal, accessible, and responsive. Preserve
+the white login panel, teal accents, clear labels, error messages, and configured
+`login_background_color` behavior. Preserve form routes, hidden `return_to`,
+username/password autocomplete, and server-side re-auth consent transaction IDs.

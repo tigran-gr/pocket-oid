@@ -16,7 +16,7 @@ use crate::{
         AuthContext, ConsumePendingReauth, DownstreamAuthorizationRequest, NewAuthorizationCode,
         NewPendingReauthConsent, NewPendingReauthTransaction,
     },
-    config::{Client, ClientAuthMode, ConsentMode},
+    config::{Client, ClientAuthMode, ConsentMode, ReAuthConsent},
     crypto::JwkSet,
     error::ApiError,
     frontend,
@@ -173,7 +173,8 @@ pub async fn login(State(state): State<AppState>, Form(form): Form<LoginForm>) -
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
-    let mut response = Redirect::to(&form.return_to).into_response();
+    let return_to = authorize_return_after_login(&form.return_to);
+    let mut response = Redirect::to(&return_to).into_response();
     let cookie = format!(
         "session_id={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=3600",
         session.session_id
@@ -332,6 +333,7 @@ async fn begin_reauth(
             NewPendingReauthTransaction {
                 downstream,
                 provider_id: provider.provider_id.clone(),
+                consent: re_auth.consent,
                 upstream_state,
                 upstream_nonce,
                 pkce_verifier,
@@ -447,6 +449,14 @@ pub async fn reauth_callback(
         upstream_issuer: identity.issuer,
     };
     let user_id = format!("{provider_id}:{}", identity.subject);
+    if transaction.consent == ReAuthConsent::Skip {
+        return issue_authorization_code_redirect_for_downstream(
+            &state,
+            transaction.downstream,
+            user_id,
+            auth_context,
+        );
+    }
     let Some(consent_id) = state.auth_store.create_pending_reauth_consent(
         NewPendingReauthConsent {
             downstream: transaction.downstream,
@@ -844,6 +854,23 @@ fn requests_fresh_authentication(prompt: Option<&str>) -> bool {
         .into_iter()
         .flat_map(str::split_whitespace)
         .any(|value| value == "login")
+}
+
+fn authorize_return_after_login(return_to: &str) -> String {
+    let mut request = parse_authorize_return(return_to);
+    let Some(prompt) = request.prompt.as_deref() else {
+        return return_to.to_string();
+    };
+    let remaining_prompts = prompt
+        .split_whitespace()
+        .filter(|value| *value != "login")
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if remaining_prompts.len() == prompt.split_whitespace().count() {
+        return return_to.to_string();
+    }
+    request.prompt = (!remaining_prompts.is_empty()).then(|| remaining_prompts.join(" "));
+    build_authorize_return(&request)
 }
 
 fn random_url_safe_token() -> String {

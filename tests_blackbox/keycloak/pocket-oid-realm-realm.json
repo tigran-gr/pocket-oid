@@ -1,0 +1,54 @@
+{
+  "realm": "pocket-oid-reauth",
+  "displayName": "Pocket-OID Keycloak Test Realm",
+  "enabled": true,
+  "registrationAllowed": false,
+  "registrationEmailAsUsername": false,
+  "rememberMe": false,
+  "loginWithEmailAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "verifyEmail": false,
+  "defaultSignatureAlgorithm": "RS256",
+  "clients": [
+    {
+      "clientId": "pocket-oid-proxy",
+      "name": "Pocket-OID re-auth test client",
+      "description": "Test-only confidential client for Pocket-OID re-auth black-box tests.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "secret": "keycloak-upstream-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "consentRequired": false,
+      "redirectUris": [],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      }
+    }
+  ],
+  "users": [
+    {
+      "id": "ff32a9de-d7f1-4dcd-bd4a-2c5ff1c5bdee",
+      "username": "keycloak-alice",
+      "enabled": true,
+      "email": "keycloak-alice@example.test",
+      "emailVerified": true,
+      "firstName": "Keycloak",
+      "lastName": "Alice",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "keycloak-password",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

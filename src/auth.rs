@@ -6,7 +6,7 @@ use std::{
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
-use crate::upstream::DiscoveredOidcProvider;
+use crate::{config::ReAuthConsent, upstream::DiscoveredOidcProvider};
 
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -66,6 +66,7 @@ pub struct DownstreamAuthorizationRequest {
 pub struct PendingReauthTransaction {
     pub downstream: DownstreamAuthorizationRequest,
     pub provider_id: String,
+    pub consent: ReAuthConsent,
     pub upstream_state: String,
     pub upstream_nonce: String,
     pub pkce_verifier: Option<String>,
@@ -78,6 +79,7 @@ pub struct PendingReauthTransaction {
 pub struct NewPendingReauthTransaction {
     pub downstream: DownstreamAuthorizationRequest,
     pub provider_id: String,
+    pub consent: ReAuthConsent,
     pub upstream_state: String,
     pub upstream_nonce: String,
     pub pkce_verifier: Option<String>,
@@ -189,6 +191,7 @@ impl AuthStore {
         let transaction = PendingReauthTransaction {
             downstream: payload.downstream,
             provider_id: payload.provider_id,
+            consent: payload.consent,
             upstream_state: payload.upstream_state.clone(),
             upstream_nonce: payload.upstream_nonce,
             pkce_verifier: payload.pkce_verifier,
@@ -285,7 +288,7 @@ mod tests {
         AuthStore, ConsumePendingReauth, DownstreamAuthorizationRequest,
         NewPendingReauthTransaction,
     };
-    use crate::upstream::DiscoveredOidcProvider;
+    use crate::{config::ReAuthConsent, upstream::DiscoveredOidcProvider};
 
     fn pending_transaction(state: &str) -> NewPendingReauthTransaction {
         NewPendingReauthTransaction {
@@ -299,6 +302,7 @@ mod tests {
                 code_challenge_method: None,
             },
             provider_id: "partner".to_string(),
+            consent: ReAuthConsent::Local,
             upstream_state: state.to_string(),
             upstream_nonce: "upstream-nonce".to_string(),
             pkce_verifier: Some("upstream-verifier".to_string()),

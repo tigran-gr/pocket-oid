@@ -164,6 +164,52 @@ async fn completes_authorization_code_flow() {
 }
 
 #[tokio::test]
+async fn prompt_login_is_satisfied_by_successful_login() {
+    let app = test_app("config-basic");
+    let authorize_path = format!(
+        "{}&prompt=login",
+        build_authorize_path(
+            "svc-a",
+            "https://app.example.local/callback",
+            "default",
+            Some("fresh-login-state"),
+            None,
+        )
+    );
+
+    let login = request(
+        app.clone(),
+        Request::post("/login")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form_body(&[
+                ("username", "alice"),
+                ("password", "password123"),
+                ("return_to", &authorize_path),
+            ])))
+            .expect("request should build"),
+    )
+    .await;
+    assert_eq!(login.status(), StatusCode::SEE_OTHER);
+    let session_cookie = session_cookie(&login);
+    let return_to = login
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .expect("login redirect should include a location");
+    assert!(!return_to.contains("prompt=login"));
+
+    let authorize_after_login = request(
+        app,
+        Request::get(return_to)
+            .header(header::COOKIE, session_cookie)
+            .body(Body::empty())
+            .expect("request should build"),
+    )
+    .await;
+    assert_eq!(authorize_after_login.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn skips_consent_for_client_configured_to_skip() {
     let config_dir = TempConfigDir::with_consent_mode("skip");
     let app = AppState::initialize(config_dir.path())

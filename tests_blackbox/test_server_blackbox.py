@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import os
 import subprocess
 import time
@@ -12,6 +13,7 @@ from tests_blackbox.blackbox_support import (
     CodeFlowCallback,
     ServerProcess,
     authorize_path,
+    configure_provider_settings,
     decode_jwt_unverified,
     enable_openid_scope,
     http_get_json,
@@ -21,6 +23,85 @@ from tests_blackbox.blackbox_support import (
     query_value,
     session_cookie,
 )
+
+
+UPSTREAM_PROVIDER_ID = "manual-upstream"
+UPSTREAM_CLIENT_ID = "pocket-oid-proxy"
+UPSTREAM_CLIENT_SECRET = "upstream-secret"
+UPSTREAM_LOGIN_BACKGROUND_COLOR = "#4f46e5"
+
+
+def _configure_manual_reauth_upstream(
+    config_dir, upstream_base_url: str, downstream_base_url: str
+):
+    configure_provider_settings(
+        config_dir,
+        "Manual Upstream Pocket-OID",
+        upstream_base_url,
+        UPSTREAM_LOGIN_BACKGROUND_COLOR,
+    )
+    clients = [
+        {
+            "client_id": UPSTREAM_CLIENT_ID,
+            "client_secret": UPSTREAM_CLIENT_SECRET,
+            "audience": "https://upstream-api.example.local",
+            "scopes": ["openid", "email"],
+            "redirect_uris": [
+                f"{downstream_base_url}/reauth/callback/{UPSTREAM_PROVIDER_ID}"
+            ],
+            "response_types": ["code"],
+            "require_pkce": True,
+            "consent_mode": "skip",
+            "metadata": {"tenant": "manual-upstream"},
+        }
+    ]
+    (config_dir / "clients.json").write_text(json.dumps(clients))
+
+
+def _configure_manual_reauth_downstream(
+    config_dir,
+    downstream_base_url: str,
+    upstream_base_url: str,
+    callback_redirect_uri: str,
+):
+    configure_provider_settings(
+        config_dir,
+        "Manual Downstream Pocket-OID",
+        downstream_base_url,
+    )
+    clients = [
+        {
+            "client_id": "svc-a",
+            "client_secret": "supersecret",
+            "audience": "https://api.example.local",
+            "scopes": ["openid", "default"],
+            "redirect_uris": [callback_redirect_uri],
+            "response_types": ["code"],
+            "metadata": {"tenant": "manual-downstream"},
+            "auth_mode": "re_auth",
+            "re_auth": {
+                "provider_id": UPSTREAM_PROVIDER_ID,
+                "upstream_scopes": ["openid", "email"],
+                "consent": "local",
+            },
+        }
+    ]
+    (config_dir / "clients.json").write_text(json.dumps(clients))
+    trusted_providers = [
+        {
+            "provider_id": UPSTREAM_PROVIDER_ID,
+            "type": "oidc",
+            "issuer": upstream_base_url,
+            "client_id": UPSTREAM_CLIENT_ID,
+            "client_secret": UPSTREAM_CLIENT_SECRET,
+            "redirect_uri": (
+                f"{downstream_base_url}/reauth/callback/{UPSTREAM_PROVIDER_ID}"
+            ),
+            "token_endpoint_auth_method": "client_secret_post",
+            "require_pkce": True,
+        }
+    ]
+    (config_dir / "trusted_providers.json").write_text(json.dumps(trusted_providers))
 
 
 class BlackBoxTests(unittest.TestCase):
@@ -272,6 +353,94 @@ class BlackBoxTests(unittest.TestCase):
         finally:
             callback.stop()
             server.stop()
+
+    @unittest.skipUnless(
+        os.environ.get("POCKET_OID_MANUAL_REAUTH") == "1",
+        "set POCKET_OID_MANUAL_REAUTH=1 to run the manual re-auth browser test",
+    )
+    def test_manual_reauth_flow_in_browser(self):
+        state = "state-manual-reauth"
+        nonce = "nonce-manual-reauth"
+        callback = CodeFlowCallback()
+        downstream = ServerProcess("config-basic")
+        upstream = ServerProcess("config-basic")
+        upstream.configure_config = lambda config_dir: _configure_manual_reauth_upstream(
+            config_dir, upstream.base_url, downstream.base_url
+        )
+        downstream.configure_config = (
+            lambda config_dir: _configure_manual_reauth_downstream(
+                config_dir,
+                downstream.base_url,
+                upstream.base_url,
+                callback.redirect_uri,
+            )
+        )
+
+        try:
+            upstream.start()
+            downstream.start()
+            callback.start(f"{downstream.base_url}/oauth/token", state)
+            visual_check_verifier = "manual-reauth-visual-check-verifier"
+            visual_check_challenge = base64.urlsafe_b64encode(
+                hashlib.sha256(visual_check_verifier.encode("ascii")).digest()
+            ).rstrip(b"=").decode("ascii")
+            upstream_login_path = authorize_path(
+                f"{downstream.base_url}/reauth/callback/{UPSTREAM_PROVIDER_ID}",
+                "state-visual-check",
+                "nonce-visual-check",
+                code_challenge=visual_check_challenge,
+                code_challenge_method="S256",
+                client_id=UPSTREAM_CLIENT_ID,
+                scope="openid email",
+                prompt="login",
+            )
+            login_status, login_html, _ = http_get_text(
+                f"{upstream.base_url}{upstream_login_path}"
+            )
+            self.assertEqual(login_status, 200)
+            self.assertIn(
+                f"background: {UPSTREAM_LOGIN_BACKGROUND_COLOR};", login_html
+            )
+
+            authorize_url = (
+                f"{downstream.base_url}"
+                f"{authorize_path(callback.redirect_uri, state, nonce, prompt='login')}"
+            )
+            timeout = int(os.environ.get("POCKET_OID_MANUAL_TIMEOUT_SECONDS", "300"))
+
+            print("\nManual re-authentication flow test")
+            print(f"Opening downstream authorization request: {authorize_url}")
+            print(
+                "You will be redirected to the purple 'Manual Upstream Pocket-OID' "
+                f"login page (background {UPSTREAM_LOGIN_BACKGROUND_COLOR})."
+            )
+            print(
+                "Log in there with username 'alice' and password 'password123', "
+                "then approve the downstream consent screen."
+            )
+            if not webbrowser.open(authorize_url):
+                print(
+                    "Browser did not open automatically; paste the URL above into your browser."
+                )
+
+            token = callback.wait(timeout)
+            self.assertEqual(token["token_type"], "Bearer")
+            self.assertEqual(token["scope"], "openid default")
+            self.assertIn("id_token", token)
+
+            header, claims = decode_jwt_unverified(token["id_token"])
+            self.assertIn("kid", header)
+            self.assertEqual(claims["iss"], downstream.base_url)
+            self.assertEqual(
+                claims["sub"], f"{UPSTREAM_PROVIDER_ID}:user-alice"
+            )
+            self.assertEqual(claims["aud"], "svc-a")
+            self.assertEqual(claims["nonce"], nonce)
+            self.assertGreater(claims["exp"], int(time.time()))
+        finally:
+            callback.stop()
+            downstream.stop()
+            upstream.stop()
 
     def test_startup_fails_with_invalid_config(self):
         config_dir = FIXTURES / "config-invalid-clients"

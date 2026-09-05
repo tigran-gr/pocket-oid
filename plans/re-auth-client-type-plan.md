@@ -14,7 +14,7 @@ The first target should be an upstream OIDC provider, including another Pocket-O
 
 ### Settled product decisions
 
-- Re-auth clients use `consent: "local"`: after upstream authentication, Pocket-OID presents its own consent screen before issuing a downstream authorization code. Any consent-skipping policy is deferred.
+- Re-auth clients default to `consent: "local"`: after upstream authentication, Pocket-OID presents its own consent screen before issuing a downstream authorization code. An explicit `consent: "skip"` is available for a registered client that intentionally omits that screen; it is used only by the opt-in Keycloak manual test.
 - Pocket-OID maps an upstream subject to its local subject as `{provider_id}:{upstream_sub}`. For example, an upstream subject of `user-123` from `partner-pocket-oid` becomes `partner-pocket-oid:user-123`.
 - The initial release must not embed raw upstream token strings or copy an entire upstream token payload into the final Pocket-OID token. Any upstream claim propagation, token reference, or encrypted-token design requires a future explicit consumer requirement and policy.
 - The initial release supports only short-lived access and ID tokens. It does not issue, store, or use refresh tokens.
@@ -141,7 +141,7 @@ On callback:
    - nonce
 7. Resolve `upstream_sub` from the validated upstream ID token's `sub` claim, then set the local subject to `{provider_id}:{upstream_sub}`.
 8. Optionally fetch upstream userinfo if configured.
-9. Continue to Pocket-OID's local consent screen; after consent, issue a local authorization code.
+9. If the registered client configures `consent: "local"`, continue to Pocket-OID's local consent screen and issue a local authorization code after approval. If it configures `consent: "skip"`, issue the local authorization code immediately.
 
 ### 4.4 Local code and token exchange
 
@@ -357,4 +357,4 @@ Prefer a focused internal module first. If HTTP mocking becomes painful, introdu
 
 ## 10) Open decisions
 
-No unresolved product decisions remain from the initial list. Future decisions are required before enabling upstream claim propagation, token references, encrypted token wrapping, consent skipping, or refresh-token support.
+No unresolved product decisions remain from the initial list. Future decisions are required before enabling upstream claim propagation, token references, encrypted token wrapping, or refresh-token support.

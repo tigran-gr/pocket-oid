@@ -41,6 +41,7 @@ pub struct ApplicationState {
 #[derive(Debug, Clone, Serialize)]
 pub struct DiscoveryDocument {
     pub issuer: String,
+    pub authorization_endpoint: String,
     pub token_endpoint: String,
     pub jwks_uri: String,
     pub grant_types_supported: Vec<String>,
@@ -114,10 +115,12 @@ impl Deref for AppState {
 impl DiscoveryDocument {
     fn new(provider: &ProviderSettings, scopes_supported: &[String]) -> Self {
         let issuer = provider.issuer.trim_end_matches('/').to_string();
+        let authorization_endpoint = format!("{issuer}/authorize");
         let token_endpoint = format!("{issuer}/oauth/token");
         let jwks_uri = format!("{issuer}/jwks.json");
         Self {
             issuer,
+            authorization_endpoint,
             token_endpoint,
             jwks_uri,
             grant_types_supported: vec![

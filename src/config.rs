@@ -88,6 +88,7 @@ pub struct ReAuthClientConfig {
 pub enum ReAuthConsent {
     #[default]
     Local,
+    Skip,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

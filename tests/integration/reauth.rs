@@ -253,6 +253,88 @@ async fn upstream_error_uses_the_stored_downstream_redirect() {
 }
 
 #[tokio::test]
+async fn reauth_flow_can_skip_local_consent() {
+    let Some(upstream) = MockOidcProvider::start().await else {
+        return;
+    };
+    let config = TempReauthConfig::with_reauth_consent(&upstream.issuer, "skip");
+    let app = AppState::initialize(config.path())
+        .expect("re-auth config should initialize")
+        .router();
+
+    let authorize = request(
+        app.clone(),
+        Request::get(authorize_path(None))
+            .body(Body::empty())
+            .expect("request should build"),
+    )
+    .await;
+    assert_eq!(authorize.status(), StatusCode::SEE_OTHER);
+    let upstream_url = response_location(&authorize);
+    let upstream_query = Url::parse(&upstream_url)
+        .expect("upstream authorization URL should parse")
+        .query_pairs()
+        .into_owned()
+        .collect::<HashMap<_, _>>();
+    let upstream_state = upstream_query
+        .get("state")
+        .expect("upstream state should be present");
+    let upstream_nonce = upstream_query
+        .get("nonce")
+        .expect("upstream nonce should be present")
+        .to_string();
+    upstream.expect_nonce(upstream_nonce);
+
+    let callback = request(
+        app.clone(),
+        Request::get(format!(
+            "/reauth/callback/partner?state={upstream_state}&code=upstream-code"
+        ))
+        .body(Body::empty())
+        .expect("request should build"),
+    )
+    .await;
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    let downstream_location = response_location(&callback);
+    assert!(downstream_location.starts_with("https://app.example.local/callback?"));
+    assert_eq!(
+        query_value(&downstream_location, "state").as_deref(),
+        Some("downstream-state")
+    );
+    let code = query_value(&downstream_location, "code").expect("downstream code is present");
+
+    let token = request(
+        app.clone(),
+        Request::post("/oauth/token")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form_body(&[
+                ("grant_type", "authorization_code"),
+                ("client_id", "svc-reauth"),
+                ("client_secret", "downstream-secret"),
+                ("redirect_uri", "https://app.example.local/callback"),
+                ("code", &code),
+            ])))
+            .expect("request should build"),
+    )
+    .await;
+    assert_eq!(token.status(), StatusCode::OK);
+    let token_body = to_bytes(token.into_body(), usize::MAX)
+        .await
+        .expect("token response should read");
+    let token_json: Value = serde_json::from_slice(&token_body).expect("token should parse");
+    let (_, jwks) = get_json(app, "/jwks.json").await;
+    let claims = verify_jwt_with_jwks(
+        token_json["access_token"]
+            .as_str()
+            .expect("access token should be present"),
+        &jwks,
+    );
+    assert_eq!(claims["sub"], "partner:user-123");
+
+    upstream.stop().await;
+}
+
+#[tokio::test]
 async fn invalid_upstream_state_does_not_issue_a_code_or_contact_the_provider() {
     let Some(upstream) = MockOidcProvider::start().await else {
         return;
@@ -366,6 +448,10 @@ impl Drop for MockOidcProvider {
 
 impl TempReauthConfig {
     fn new(issuer: &str) -> Self {
+        Self::with_reauth_consent(issuer, "local")
+    }
+
+    fn with_reauth_consent(issuer: &str, reauth_consent: &str) -> Self {
         let path = std::env::temp_dir().join(format!("pocket-oid-reauth-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&path).expect("re-auth temp config should be created");
         copy_dir_all(&fixture_config_dir("config-basic"), &path);
@@ -384,7 +470,7 @@ impl TempReauthConfig {
                 "re_auth": {
                     "provider_id": "partner",
                     "upstream_scopes": ["openid", "email"],
-                    "consent": "local"
+                    "consent": reauth_consent
                 }
             }]))
             .expect("re-auth clients config should serialize"),
