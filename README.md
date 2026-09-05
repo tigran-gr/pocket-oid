@@ -2,7 +2,8 @@
 
 `pocket-oid` is a small OpenID Connect provider. It issues RS256-signed JWTs
 for the client-credentials and authorization-code flows and exposes discovery,
-JWKS, health, and readiness endpoints.
+JWKS, health, and readiness endpoints. It also supports OIDC identity brokering
+through its re-authentication (`re_auth`) mode.
 
 ## Run it
 
@@ -84,6 +85,48 @@ The checked-in `config/` directory contains development credentials and keys;
 replace them before any non-local deployment. Protect the signing key and client
 secrets with appropriate filesystem permissions.
 
+## Re-authentication (identity brokering)
+
+Re-auth lets an application use accounts from a trusted upstream OIDC provider,
+such as another Pocket-OID instance. The browser signs in at the
+upstream provider, then returns to Pocket-OID. Pocket-OID validates the upstream
+ID token and issues its own authorization code and tokens for the application.
+
+To enable it, add these fields to the application's registered client entry in
+`clients.json`:
+
+```json
+{
+  "auth_mode": "re_auth",
+  "re_auth": {
+    "provider_id": "partner-pocket-oid",
+    "upstream_scopes": ["openid", "email"],
+    "consent": "local"
+  }
+}
+```
+
+Define the matching provider in `trusted_providers.json`, including its issuer,
+upstream client credentials, and Pocket-OID callback URI:
+`https://<pocket-oid-host>/reauth/callback/partner-pocket-oid`. Register that exact
+callback URI with the upstream provider. Pocket-OID discovers upstream endpoints
+through the issuer's `/.well-known/openid-configuration`. See the
+[re-auth configuration example](plans/re-auth-client-type-plan.md#3-configuration-model)
+for the complete client and provider entries.
+
+Local consent is shown by default; `re_auth.consent: "skip"` omits that screen.
+This setting is separate from `consent_mode`, which controls consent for local
+authentication. Clients without `auth_mode` continue to use local authentication;
+the browser cannot override the registered authentication mode.
+
+The resulting subject is `{provider_id}:{upstream_sub}`, for example
+`partner-pocket-oid:user-123`. Upstream tokens and their entire payloads are not
+embedded in downstream tokens, and upstream claim propagation and refresh tokens
+are not currently supported. The configuration loader still requires `users.json`
+with at least one local user, even when all clients use re-auth.
+
+Try the [manual browser test with a Pocket-OID upstream](tests_blackbox/README.md#manual-re-auth-browser-flow).
+
 ## Endpoints
 
 With the default listener, the service provides:
@@ -92,6 +135,8 @@ With the default listener, the service provides:
 - `GET /jwks.json` — public signing keys
 - `POST /oauth/token` — token exchange
 - `GET /authorize`, `POST /login`, `POST /consent` — authorization-code flow
+- `GET /reauth/callback/:provider_id` — upstream authorization callback
+- `GET /reauth/consent/:transaction_id`, `POST /reauth/consent` — re-auth consent
 - `GET /healthz` and `GET /readyz` — health checks
 
 Discovery metadata uses the configured issuer, so a reverse proxy should route
