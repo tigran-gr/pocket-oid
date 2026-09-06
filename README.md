@@ -1,5 +1,7 @@
 # pocket-oid
 
+<img src="assets/pocket-oid-logo.svg" alt="Pocket-OID logo: a key tucked into a teal pocket" width="480">
+
 `pocket-oid` is a small OpenID Connect provider. It issues RS256-, ES256-, or PS256-signed JWTs
 for the client-credentials and authorization-code flows and exposes discovery,
 JWKS, health, and readiness endpoints. It also supports OIDC identity brokering
