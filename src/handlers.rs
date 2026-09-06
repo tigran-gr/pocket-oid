@@ -147,24 +147,23 @@ pub async fn authorize(
 }
 
 pub async fn login(State(state): State<AppState>, Form(form): Form<LoginForm>) -> Response {
-    let Some(user) = state.users.get(&form.username) else {
-        return Html(frontend::login_page(
-            &state.provider.name,
-            &form.return_to,
-            Some("Invalid credentials"),
-            state.provider.login_background_color.as_deref(),
-        ))
-        .into_response();
+    let user = match state
+        .users
+        .authenticate(&form.username, &form.password)
+        .await
+    {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            return Html(frontend::login_page(
+                &state.provider.name,
+                &form.return_to,
+                Some("Invalid credentials"),
+                state.provider.login_background_color.as_deref(),
+            ))
+            .into_response();
+        }
+        Err(error) => return ApiError::internal(error).into_response(),
     };
-    if !user.verify_password(&form.password) {
-        return Html(frontend::login_page(
-            &state.provider.name,
-            &form.return_to,
-            Some("Invalid credentials"),
-            state.provider.login_background_color.as_deref(),
-        ))
-        .into_response();
-    }
     let Some(session) =
         state
             .auth_store

@@ -8,11 +8,11 @@ use jsonschema::JSONSchema;
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 use url::Url;
 
-use crate::error::AppError;
+use crate::{error::AppError, users::UserStore};
+
+pub use crate::users::{User, UserConfig, UsersConfig};
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ProviderSettings {
@@ -215,53 +215,11 @@ pub struct Client {
     pub re_auth: Option<ReAuthClientConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct UsersConfig {
-    pub provider: String,
-    #[serde(default)]
-    #[schemars(default)]
-    pub users: Vec<UserConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct UserConfig {
-    pub id: String,
-    pub username: String,
-    #[serde(default)]
-    #[schemars(default)]
-    pub password_hash: Option<String>,
-    #[serde(default)]
-    #[schemars(default)]
-    pub password_plain: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct User {
-    pub id: String,
-    pub username: String,
-    credential: PasswordCredential,
-}
-
-#[derive(Debug, Clone)]
-enum PasswordCredential {
-    Sha256 { hex: String },
-    Plain { value: String },
-}
-
-impl User {
-    pub fn verify_password(&self, password: &str) -> bool {
-        match &self.credential {
-            PasswordCredential::Sha256 { hex } => constant_time_eq(hex, &sha256_hex(password)),
-            PasswordCredential::Plain { value } => constant_time_eq(value, password),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct LoadedConfig {
     pub provider: ProviderSettings,
     pub clients: HashMap<String, Client>,
-    pub users: HashMap<String, User>,
+    pub users: UserStore,
     pub trusted_providers: HashMap<String, TrustedProviderConfig>,
     pub token_template: Value,
     pub config_root: PathBuf,
@@ -290,10 +248,7 @@ impl LoadedConfig {
         let trusted_providers = build_trusted_providers(trusted_providers_vec)?;
         validate_reauth_clients(&clients, &trusted_providers)?;
         let users_config: UsersConfig = read_json(root.join("users.json"))?;
-        let users = build_users_from_config(users_config)?;
-        if users.is_empty() {
-            return Err(AppError::Config("no users configured".into()));
-        }
+        let users = UserStore::load(users_config, root)?;
 
         let token_template: Value = read_json(root.join("token_template.json"))?;
         if !token_template.is_object() {
@@ -504,81 +459,6 @@ fn validate_absolute_url(value: &str, field_name: &str) -> Result<(), AppError> 
     Ok(())
 }
 
-fn build_users(users: Vec<UserConfig>) -> Result<HashMap<String, User>, AppError> {
-    users
-        .into_iter()
-        .map(|user| {
-            let credential = user_credential(&user)?;
-            Ok((
-                user.username.clone(),
-                User {
-                    id: user.id,
-                    username: user.username,
-                    credential,
-                },
-            ))
-        })
-        .collect()
-}
-
-fn build_users_from_config(config: UsersConfig) -> Result<HashMap<String, User>, AppError> {
-    if config.provider != "file" {
-        return Err(AppError::Config(format!(
-            "unsupported users provider '{}'; supported providers: file",
-            config.provider
-        )));
-    }
-    build_users(config.users)
-}
-
-fn user_credential(user: &UserConfig) -> Result<PasswordCredential, AppError> {
-    match (&user.password_hash, &user.password_plain) {
-        (Some(_), Some(_)) => Err(AppError::Config(format!(
-            "user '{}' must set only one of password_hash or password_plain",
-            user.username
-        ))),
-        (Some(hash), None) => parse_password_hash(&user.username, hash),
-        (None, Some(password)) => Ok(PasswordCredential::Plain {
-            value: password.clone(),
-        }),
-        (None, None) => Err(AppError::Config(format!(
-            "user '{}' must set password_hash or password_plain",
-            user.username
-        ))),
-    }
-}
-
-fn parse_password_hash(username: &str, hash: &str) -> Result<PasswordCredential, AppError> {
-    let Some(hex) = hash.strip_prefix("sha256:") else {
-        return Err(AppError::Config(format!(
-            "user '{username}' password_hash must use sha256:<hex>"
-        )));
-    };
-    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(AppError::Config(format!(
-            "user '{username}' password_hash must contain a 64-character sha256 hex digest"
-        )));
-    }
-    Ok(PasswordCredential::Sha256 {
-        hex: hex.to_ascii_lowercase(),
-    })
-}
-
-fn sha256_hex(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()
-}
-
-fn constant_time_eq(left: &str, right: &str) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.as_bytes().ct_eq(right.as_bytes()).into()
-}
-
 fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> Result<T, AppError> {
     let data = fs::read_to_string(&path)?;
     serde_json::from_str(&data).map_err(AppError::from)
@@ -616,10 +496,7 @@ fn validate_json(schema: &schemars::schema::RootSchema, value: &Value) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ClientAuthMode, ClientConfig, UserConfig, UsersConfig, build_clients, build_users,
-        build_users_from_config, validate_reauth_clients,
-    };
+    use super::{ClientAuthMode, ClientConfig, build_clients, validate_reauth_clients};
 
     #[test]
     fn client_signing_override_is_optional_and_only_accepts_supported_algorithms() {
@@ -719,85 +596,5 @@ mod tests {
                 .to_string()
                 .contains("unknown provider_id 'missing-provider'")
         );
-    }
-
-    #[test]
-    fn builds_user_with_sha256_password_hash() {
-        let users = build_users(vec![UserConfig {
-            id: "user-alice".to_string(),
-            username: "alice".to_string(),
-            password_hash: Some(
-                "sha256:ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f"
-                    .to_string(),
-            ),
-            password_plain: None,
-        }])
-        .expect("user config should build");
-
-        let user = users.get("alice").expect("user should exist");
-        assert!(user.verify_password("password123"));
-        assert!(!user.verify_password("wrong-password"));
-    }
-
-    #[test]
-    fn builds_user_with_test_plain_password() {
-        let users = build_users(vec![UserConfig {
-            id: "user-alice".to_string(),
-            username: "alice".to_string(),
-            password_hash: None,
-            password_plain: Some("password123".to_string()),
-        }])
-        .expect("user config should build");
-
-        let user = users.get("alice").expect("user should exist");
-        assert!(user.verify_password("password123"));
-    }
-
-    #[test]
-    fn rejects_legacy_password_key_without_new_password_fields() {
-        let config: UsersConfig = serde_json::from_str(
-            r#"{
-                "provider": "file",
-                "users": [
-                    {"id":"user-alice","username":"alice","password":"password123"}
-                ]
-            }"#,
-        )
-        .expect("legacy json should deserialize with unknown password ignored");
-
-        let error =
-            build_users_from_config(config).expect_err("legacy password key should be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("must set password_hash or password_plain")
-        );
-    }
-
-    #[test]
-    fn builds_users_from_file_provider_config() {
-        let users = build_users_from_config(UsersConfig {
-            provider: "file".to_string(),
-            users: vec![UserConfig {
-                id: "user-alice".to_string(),
-                username: "alice".to_string(),
-                password_hash: None,
-                password_plain: Some("password123".to_string()),
-            }],
-        })
-        .expect("file provider user config should build");
-
-        assert!(users.contains_key("alice"));
-    }
-
-    #[test]
-    fn rejects_unsupported_users_provider() {
-        let error = build_users_from_config(UsersConfig {
-            provider: "postgres".to_string(),
-            users: Vec::new(),
-        })
-        .expect_err("unsupported provider should be rejected");
-
-        assert!(error.to_string().contains("unsupported users provider"));
     }
 }

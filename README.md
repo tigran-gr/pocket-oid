@@ -78,9 +78,59 @@ setting (or set it to `null`) to retain the default background.
 redirect URIs, supported response types, PKCE policy, consent mode, signing algorithm, and token
 metadata. At least one enabled client is required.
 
-`users.json` contains users for the authorization-code flow. At least one user
-is required. Store either a SHA-256 password hash (`password_hash`) or a plain
-password (`password_plain`) for each user; use hashes outside local development.
+`users.json` selects the local user repository for the authorization-code flow.
+At least one enabled user is required. The file provider keeps the existing
+inline format:
+
+```json
+{
+  "provider": "file",
+  "users": [
+    {
+      "id": "user-alice",
+      "username": "alice",
+      "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$..."
+    }
+  ]
+}
+```
+
+The file provider accepts Argon2id PHC hashes, legacy `sha256:<hex>` hashes, or
+`password_plain` for development compatibility. Prefer Argon2id; SHA-256 is a
+fast legacy hash and is not suitable for new passwords, and plaintext passwords
+must not be used outside local development.
+
+To use SQLite instead, configure:
+
+```json
+{
+  "provider": "sqlite",
+  "path": "data/users.sqlite3"
+}
+```
+
+Relative paths resolve against `POCKET_OID_CONFIG_DIR`; absolute paths are also
+accepted. Pocket-OID creates the parent directory, database, and version-1 schema
+if necessary, then requires at least one enabled user. SQLite users are queried
+on every login, so database changes take effect without restarting the service.
+SQLite accepts only Argon2id PHC password hashes. The schema is:
+
+```sql
+CREATE TABLE users (
+    id            TEXT PRIMARY KEY NOT NULL CHECK (length(id) > 0),
+    username      TEXT NOT NULL UNIQUE CHECK (length(username) > 0),
+    password_hash TEXT NOT NULL CHECK (length(password_hash) > 0),
+    enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+PRAGMA user_version = 1;
+```
+
+Generate a unique-salt Argon2id PHC string with a compatible password-management
+tool before inserting a user. Database encryption is not currently supported;
+protect the database and its backups with appropriate filesystem permissions and
+storage-level encryption.
 
 `token_template.json` is the JSON claim template for issued tokens. The supplied
 configuration illustrates the supported runtime placeholders. Keep its `iss`

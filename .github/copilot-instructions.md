@@ -28,8 +28,9 @@ Source layout:
 - `Cargo.toml`: Rust edition and dependency declarations.
 - `src/main.rs`: CLI help/version, tracing, configuration selection, and listener.
 - `src/app.rs`: shared application state, startup wiring, routes, and discovery.
-- `src/config.rs`: config loading, schema and semantic validation, local users,
-  registered clients, and trusted providers.
+- `src/config.rs`: config loading, schema and semantic validation, registered
+  clients, and trusted providers.
+- `src/users.rs`: file and SQLite user repositories plus password verification.
 - `src/handlers.rs`: token exchange, authorization, local login/consent,
   re-auth callback/consent, and metadata/health handlers.
 - `src/auth.rs`: in-memory sessions, authorization codes, and pending re-auth
@@ -73,10 +74,12 @@ A configuration directory must contain:
 - `keys/signing-key.pem` (unless the provider default has an explicit `signing_key_paths` entry)
 
 The loader requires at least one enabled client and at least one local user,
-including for setups that use only re-auth clients. `trusted_providers.json` is
-optional when no re-auth clients are configured. Every re-auth client must
-reference a provider defined in that file and include `openid` in its upstream
-scopes. Provider credentials belong in the trusted-provider definition.
+including for setups that use only re-auth clients. `users.json` selects either
+the inline `file` provider or a `sqlite` database; SQLite rows require Argon2id
+PHC password hashes. `trusted_providers.json` is optional when no re-auth clients
+are configured. Every re-auth client must reference a provider defined in that
+file and include `openid` in its upstream scopes. Provider credentials belong in
+the trusted-provider definition.
 
 Client authentication and consent settings:
 

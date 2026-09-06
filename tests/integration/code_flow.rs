@@ -17,6 +17,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use pocket_oid::app::AppState;
+use rusqlite::{Connection, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -161,6 +162,61 @@ async fn completes_authorization_code_flow() {
     let (_, jwks) = get_json(app, "/jwks.json").await;
     let claims = verify_jwt_with_jwks(token, &jwks);
     assert_eq!(claims["sub"], "user-alice");
+}
+
+#[tokio::test]
+async fn authenticates_from_sqlite_and_observes_account_changes_without_restart() {
+    let config = TempConfigDir::with_sqlite_user();
+    let state = AppState::initialize(config.path()).expect("sqlite app state should initialize");
+    let app = state.router();
+    let authorize_path = build_authorize_path(
+        "svc-a",
+        "https://app.example.local/callback",
+        "default",
+        Some("sqlite-state"),
+        None,
+    );
+
+    let login = request(
+        app.clone(),
+        Request::post("/login")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form_body(&[
+                ("username", "alice"),
+                ("password", "password123"),
+                ("return_to", &authorize_path),
+            ])))
+            .expect("request should build"),
+    )
+    .await;
+    assert_eq!(login.status(), StatusCode::SEE_OTHER);
+
+    let connection = Connection::open(config.path().join("data/users.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE users SET enabled = 0, updated_at = CURRENT_TIMESTAMP WHERE username = ?1",
+            params!["alice"],
+        )
+        .unwrap();
+    drop(connection);
+
+    let disabled_login = request(
+        app,
+        Request::post("/login")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form_body(&[
+                ("username", "alice"),
+                ("password", "password123"),
+                ("return_to", &authorize_path),
+            ])))
+            .expect("request should build"),
+    )
+    .await;
+    assert_eq!(disabled_login.status(), StatusCode::OK);
+    let body = to_bytes(disabled_login.into_body(), usize::MAX)
+        .await
+        .expect("response body should read");
+    assert!(String::from_utf8_lossy(&body).contains("Invalid credentials"));
 }
 
 #[tokio::test]
@@ -785,6 +841,47 @@ impl Drop for LoopbackListener {
 }
 
 impl TempConfigDir {
+    fn with_sqlite_user() -> Self {
+        let root = std::env::temp_dir().join(format!("pocket-oid-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("data")).expect("temp config directory should be created");
+        copy_dir_all(&fixture_config_dir("config-basic"), &root);
+        fs::write(
+            root.join("users.json"),
+            br#"{"provider":"sqlite","path":"data/users.sqlite3"}"#,
+        )
+        .expect("sqlite users config should write");
+
+        let database_path = root.join("data/users.sqlite3");
+        let connection = Connection::open(&database_path).expect("sqlite database should open");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE users (
+                    id            TEXT PRIMARY KEY NOT NULL CHECK (length(id) > 0),
+                    username      TEXT NOT NULL UNIQUE CHECK (length(username) > 0),
+                    password_hash TEXT NOT NULL CHECK (length(password_hash) > 0),
+                    enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                    created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                PRAGMA user_version = 1;
+                "#,
+            )
+            .expect("sqlite users schema should initialize");
+        connection
+            .execute(
+                "INSERT INTO users (id, username, password_hash) VALUES (?1, ?2, ?3)",
+                params![
+                    "user-alice",
+                    "alice",
+                    "$argon2id$v=19$m=19456,t=2,p=1$dW5pcXVlLXRlc3Qtc2FsdA$d83xaLG7lIay1JJc/lePm9mb8aiz42ZVU3KbfkhgV4E"
+                ],
+            )
+            .expect("sqlite user should insert");
+
+        Self { path: root }
+    }
+
     fn with_pkce_required() -> Self {
         let root = std::env::temp_dir().join(format!("pocket-oid-test-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("temp config directory should be created");

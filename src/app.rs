@@ -20,6 +20,7 @@ use crate::{
     handlers,
     token::TokenTemplate,
     upstream::UpstreamClient,
+    users::UserStore,
 };
 
 #[derive(Clone)]
@@ -28,7 +29,7 @@ pub struct AppState(Arc<ApplicationState>);
 pub struct ApplicationState {
     pub provider: ProviderSettings,
     pub clients: HashMap<String, Client>,
-    pub users: HashMap<String, crate::config::User>,
+    pub users: UserStore,
     pub trusted_providers: HashMap<String, TrustedProviderConfig>,
     pub upstream_client: UpstreamClient,
     pub token_template: TokenTemplate,

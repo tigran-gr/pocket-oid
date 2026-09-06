@@ -207,9 +207,12 @@ These are hypotheses to test, not confirmed bottlenecks:
   username. At a sustained successful fresh-login rate R, live sessions can
   approach R × 3,600. For illustration, 100/s would produce about 360,000 live
   sessions. Do not shorten the TTL when claiming current-implementation capacity.
-- **Password cost:** [config.rs](../src/config.rs), `verify_password`, uses plain
-  comparison or SHA-256 verification according to configuration. Record the
-  selected mode; a future password-hashing change requires a new baseline.
+- **Password cost:** [users.rs](../src/users.rs) runs password verification on
+  Tokio's blocking pool behind a CPU-count-based concurrency limit. The file
+  provider can use Argon2id, legacy SHA-256, or development plaintext; SQLite
+  requires Argon2id. Record the repository, password format, Argon2 parameters,
+  and time spent queued for a verification permit. Benchmark Argon2id separately
+  from legacy fixtures rather than extrapolating from their much cheaper hashes.
 
 Collect server CPU per core, RSS, thread count, open connections/file descriptors,
 network traffic, and errors throughout each run. The app currently has HTTP

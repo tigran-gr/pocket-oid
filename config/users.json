@@ -4,7 +4,7 @@
     {
       "id": "user-alice",
       "username": "alice",
-      "password_hash": "sha256:ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f"
+      "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$dW5pcXVlLXRlc3Qtc2FsdA$d83xaLG7lIay1JJc/lePm9mb8aiz42ZVU3KbfkhgV4E"
     }
   ]
 }

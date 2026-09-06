@@ -14,3 +14,6 @@ __pycache__/
 /tools/keycloak/dist/
 
 .vscode/settings.json
+
+# Runtime SQLite user repository from the documented config/data path.
+/config/data/
