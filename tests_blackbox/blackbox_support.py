@@ -186,8 +186,10 @@ def configure_provider_settings(
 
 
 class CodeFlowCallback:
-    def __init__(self):
+    def __init__(self, client_id: str = "svc-a", client_secret: str = "supersecret"):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _CallbackHandler)
+        self.server.client_id = client_id
+        self.server.client_secret = client_secret
         self.server.result = None
         self.server.error = None
         self.server.event = threading.Event()
@@ -251,8 +253,8 @@ class _CallbackHandler(BaseHTTPRequestHandler):
             self.server.token_url,
             {
                 "grant_type": "authorization_code",
-                "client_id": "svc-a",
-                "client_secret": "supersecret",
+                "client_id": self.server.client_id,
+                "client_secret": self.server.client_secret,
                 "redirect_uri": self.server.redirect_uri,
                 "code": code,
             },

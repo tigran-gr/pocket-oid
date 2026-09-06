@@ -70,7 +70,7 @@ A configuration directory must contain:
 - `clients.json`
 - `users.json`
 - `token_template.json`
-- `keys/signing-key.pem`
+- `keys/signing-key.pem` (unless the provider default has an explicit `signing_key_paths` entry)
 
 The loader requires at least one enabled client and at least one local user,
 including for setups that use only re-auth clients. `trusted_providers.json` is
@@ -92,9 +92,16 @@ Keep `token_template.json`'s `iss` aligned with the configured provider issuer.
 The checked-in credentials and signing keys are development fixtures.
 
 `provider.json` selects `signing_algorithm` (`RS256` by default, `ES256`, or `PS256`).
-All use an unencrypted PKCS#8 `keys/signing-key.pem`; ES256 requires P-256,
-and PS256 requires RSA with at least 2048 bits.
-Discovery and JWKS describe only the active signing algorithm and key.
+An optional client `signing_algorithm` overrides this for both access and ID tokens;
+omitted or null values inherit the provider default. Only registered configuration
+selects the algorithm, never OAuth request parameters.
+The default key falls back to `keys/signing-key.pem`. `provider.json` can map
+algorithms to private-key files in `signing_key_paths`; relative paths resolve
+against the configuration directory. Non-default algorithms used by enabled
+clients require map entries and distinct keys. All keys use unencrypted PKCS#8;
+ES256 requires P-256, and PS256 requires RSA with at least 2048 bits.
+Discovery and JWKS describe the provider default and enabled client overrides,
+with one key per algorithm and unique key IDs. Unused key paths are not loaded.
 Trusted providers separately set `allowed_signing_algorithms`, defaulting to
 `["RS256"]`; ES256 and PS256 upstream validation must be explicitly enabled. Preserve
 algorithm, key-type, curve, and key-usage checks when extending verification.

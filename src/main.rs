@@ -10,7 +10,7 @@ use tracing_subscriber::{EnvFilter, fmt};
     name = "pocket-oid",
     version,
     about = "A minimal OpenID Connect provider",
-    after_help = "Configuration:\n  Set POCKET_OID_CONFIG_DIR to the directory containing provider.json,\n  clients.json, users.json, token_template.json, and keys/signing-key.pem.\n  Defaults to ./config."
+    after_help = "Configuration:\n  Set POCKET_OID_CONFIG_DIR to the directory containing provider.json,\n  clients.json, users.json, and token_template.json. Defaults to ./config.\n  The default signing key is keys/signing-key.pem unless signing_key_paths\n  selects another file. Client signing_algorithm overrides require keys\n  for any additional algorithms in provider.json's signing_key_paths."
 )]
 struct Cli;
 

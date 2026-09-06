@@ -278,16 +278,46 @@ async fn reauth_accepts_es256_upstream_and_issues_ps256_downstream() {
     reauth_skip_consent_with_signing(SigningAlgorithm::ES256, SigningAlgorithm::PS256).await;
 }
 
+#[tokio::test]
+async fn reauth_respects_the_downstream_client_signing_override() {
+    reauth_skip_consent_with_override(
+        SigningAlgorithm::RS256,
+        SigningAlgorithm::RS256,
+        Some(SigningAlgorithm::PS256),
+    )
+    .await;
+}
+
 async fn reauth_skip_consent_with_signing(
     upstream_algorithm: SigningAlgorithm,
     downstream_algorithm: SigningAlgorithm,
+) {
+    reauth_skip_consent_with_override(upstream_algorithm, downstream_algorithm, None).await;
+}
+
+async fn reauth_skip_consent_with_override(
+    upstream_algorithm: SigningAlgorithm,
+    default_algorithm: SigningAlgorithm,
+    client_override: Option<SigningAlgorithm>,
 ) {
     let Some(upstream) = MockOidcProvider::start_with_algorithm(upstream_algorithm).await else {
         return;
     };
     let config = TempReauthConfig::with_reauth_consent(&upstream.issuer, "skip");
     config.allow_signing_algorithms(&[upstream_algorithm]);
-    crate::common::configure_signing(config.path(), downstream_algorithm);
+    crate::common::configure_signing(config.path(), default_algorithm);
+    if let Some(algorithm) = client_override {
+        crate::common::configure_signing_key(
+            config.path(),
+            algorithm,
+            &fixture_config_dir("keys").join("rsa-alternate.pem"),
+        );
+        let path = config.path().join("clients.json");
+        let mut clients: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        clients[0]["signing_algorithm"] = json!(algorithm);
+        fs::write(path, serde_json::to_vec(&clients).unwrap()).unwrap();
+    }
+    let downstream_algorithm = client_override.unwrap_or(default_algorithm);
     let app = AppState::initialize(config.path())
         .expect("re-auth config should initialize")
         .router();
@@ -353,7 +383,21 @@ async fn reauth_skip_consent_with_signing(
         .expect("token response should read");
     let token_json: Value = serde_json::from_slice(&token_body).expect("token should parse");
     let (_, jwks) = get_json(app, "/jwks.json").await;
-    assert_eq!(jwks["keys"][0]["alg"], downstream_algorithm.as_str());
+    for field in ["access_token", "id_token"] {
+        assert_eq!(
+            jsonwebtoken::decode_header(token_json[field].as_str().unwrap())
+                .unwrap()
+                .alg,
+            downstream_algorithm.jwt_algorithm()
+        );
+    }
+    let id_claims = crate::common::verify_jwt_with_jwks_for(
+        token_json["id_token"].as_str().unwrap(),
+        &jwks,
+        "https://pocket-oid.local",
+        "svc-reauth",
+    );
+    assert_eq!(id_claims["sub"], "partner:user-123");
     let claims = verify_jwt_with_jwks(
         token_json["access_token"]
             .as_str()

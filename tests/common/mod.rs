@@ -126,6 +126,15 @@ pub fn configure_signing(config_dir: &Path, algorithm: SigningAlgorithm) {
     .unwrap();
 }
 
+pub fn configure_signing_key(config_dir: &Path, algorithm: SigningAlgorithm, source: &Path) {
+    let provider_path = config_dir.join("provider.json");
+    let mut provider: Value = serde_json::from_slice(&fs::read(&provider_path).unwrap()).unwrap();
+    let relative_path = format!("keys/{}.pem", algorithm.as_str().to_ascii_lowercase());
+    provider["signing_key_paths"][algorithm.as_str()] = Value::String(relative_path.clone());
+    fs::write(provider_path, serde_json::to_vec_pretty(&provider).unwrap()).unwrap();
+    fs::copy(source, config_dir.join(relative_path)).unwrap();
+}
+
 pub struct SigningTestConfig {
     pub path: PathBuf,
 }

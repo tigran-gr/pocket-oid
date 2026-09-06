@@ -466,10 +466,35 @@ async fn completes_ps256_code_flow_with_id_and_access_token_verification() {
 }
 
 async fn code_flow_with_signing(algorithm: pocket_oid::config::SigningAlgorithm) {
+    code_flow_with_signing_override(algorithm, None).await;
+}
+
+#[tokio::test]
+async fn client_override_signs_both_id_and_access_tokens_in_code_flow() {
+    use pocket_oid::config::SigningAlgorithm;
+    code_flow_with_signing_override(SigningAlgorithm::RS256, Some(SigningAlgorithm::PS256)).await;
+}
+
+async fn code_flow_with_signing_override(
+    default_algorithm: pocket_oid::config::SigningAlgorithm,
+    client_override: Option<pocket_oid::config::SigningAlgorithm>,
+) {
     let listener = LoopbackListener::start().await;
     let redirect_uri = listener.redirect_uri();
     let config_dir = TempConfigDir::with_loopback_redirect(&redirect_uri);
-    crate::common::configure_signing(config_dir.path(), algorithm);
+    crate::common::configure_signing(config_dir.path(), default_algorithm);
+    if let Some(algorithm) = client_override {
+        crate::common::configure_signing_key(
+            config_dir.path(),
+            algorithm,
+            &fixture_config_dir("keys").join("rsa-alternate.pem"),
+        );
+        let path = config_dir.path().join("clients.json");
+        let mut clients: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        clients[0]["signing_algorithm"] = serde_json::json!(algorithm);
+        fs::write(path, serde_json::to_vec(&clients).unwrap()).unwrap();
+    }
+    let algorithm = client_override.unwrap_or(default_algorithm);
     let app = AppState::initialize(config_dir.path())
         .expect("app state should initialize")
         .router();

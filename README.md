@@ -54,6 +54,9 @@ token_template.json
 keys/signing-key.pem
 ```
 
+`keys/signing-key.pem` is the default key location; `signing_key_paths` can select
+another location as described under [token signing](#token-signing).
+
 `provider.json` defines the provider name, public issuer URL, default token TTL,
 and listen address. The issuer should be the externally reachable base URL used
 by clients; it is used to construct the discovery and JWKS URLs.
@@ -70,7 +73,7 @@ setting (or set it to `null`) to retain the default background.
 
 `clients.json` is an array of OAuth clients. Each client needs `client_id` and
 `client_secret`; it may additionally set an audience, allowed scopes, token TTL,
-redirect URIs, supported response types, PKCE policy, consent mode, and token
+redirect URIs, supported response types, PKCE policy, consent mode, signing algorithm, and token
 metadata. At least one enabled client is required.
 
 `users.json` contains users for the authorization-code flow. At least one user
@@ -88,8 +91,9 @@ secrets with appropriate filesystem permissions.
 ### Token signing
 
 `provider.json` accepts `signing_algorithm`: `"RS256"` (the default), `"ES256"`, or `"PS256"`.
-The selected algorithm signs both access tokens and ID tokens. Discovery advertises
-that algorithm, and `/jwks.json` publishes its matching public key.
+This is the default for clients that do not specify their own `signing_algorithm`.
+The effective client algorithm signs both access tokens and ID tokens, including
+tokens issued after re-authentication.
 
 For ES256, set this field in `provider.json`:
 
@@ -127,9 +131,60 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out ps256-key.pem
 Install it as `keys/signing-key.pem` and restart. PS256 publishes an RSA JWK with
 `alg: "PS256"`, `n`, and `e`. Keys shorter than 2048 bits are rejected at startup.
 
-One signing key and algorithm are active at a time. Changing either updates the
-published JWKS after restart; old verification keys are not retained.
-Coordinate a change with token consumers and the lifetime of previously issued tokens.
+#### Client signing overrides
+
+Clients can optionally set `signing_algorithm` in `clients.json` to `"RS256"`,
+`"ES256"`, or `"PS256"`. Omit it (or set it to `null`) to inherit the provider
+default. For example, these two client entries use different algorithms:
+
+```json
+[
+  {
+    "client_id": "rsa-client",
+    "client_secret": "replace-with-rsa-client-secret",
+    "signing_algorithm": "RS256"
+  },
+  {
+    "client_id": "pss-client",
+    "client_secret": "replace-with-pss-client-secret",
+    "signing_algorithm": "PS256"
+  }
+]
+```
+
+Keep the provider's default RSA key in `keys/signing-key.pem`. Generate a separate
+RSA key for PS256 with the command above, install it as `keys/ps256.pem`, and add
+these fields to the existing `provider.json`:
+
+```json
+{
+  "signing_algorithm": "RS256",
+  "signing_key_paths": {
+    "PS256": "keys/ps256.pem"
+  }
+}
+```
+
+`signing_key_paths` maps algorithms to private-key files. Relative paths are
+resolved against the configuration directory; absolute paths are also accepted.
+The provider default falls back to `keys/signing-key.pem` if it has no map entry.
+Every other algorithm requested by an enabled client needs a map entry. Multiple
+clients using the same algorithm share its key. To add ES256 clients, provide an
+ES256 map entry pointing to a P-256 key.
+
+Different algorithms must use distinct keys. Startup rejects missing or incompatible
+keys and reuse of the same key across algorithms. This keeps every `kid` unambiguous
+and binds each key to one algorithm, following [JWT best practices](https://www.rfc-editor.org/rfc/rfc8725.html#section-3.1).
+
+Discovery advertises the provider default plus overrides used by enabled clients;
+JWKS publishes one public key per algorithm. Disabled clients and unused entries
+in `signing_key_paths` do not enable or publish additional algorithms. Existing
+default-key IDs are preserved. OAuth request parameters cannot override the
+registered client's algorithm, and upstream verification policy is independent.
+
+Restart after configuration changes. Old verification keys are not retained when
+an algorithm is removed or its key is replaced; coordinate changes with token
+consumers and the lifetime of previously issued tokens.
 
 ## Re-authentication (identity brokering)
 

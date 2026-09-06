@@ -42,6 +42,20 @@ def _configure_signing(config_dir, algorithm):
         )
 
 
+def _configure_mixed_signing(config_dir):
+    provider_path = config_dir / "provider.json"
+    provider = json.loads(provider_path.read_text())
+    provider["signing_key_paths"] = {"PS256": "keys/ps256.pem"}
+    provider_path.write_text(json.dumps(provider))
+    (config_dir / "keys" / "ps256.pem").write_bytes(
+        (FIXTURES / "keys" / "rsa-alternate.pem").read_bytes()
+    )
+    clients_path = config_dir / "clients.json"
+    clients = json.loads(clients_path.read_text())
+    clients.append(dict(clients[0], client_id="svc-pss", signing_algorithm="PS256"))
+    clients_path.write_text(json.dumps(clients))
+
+
 def _configure_manual_reauth_upstream(
     config_dir, upstream_base_url: str, downstream_base_url: str
 ):
@@ -116,6 +130,36 @@ def _configure_manual_reauth_downstream(
 
 
 class BlackBoxTests(unittest.TestCase):
+    def test_clients_can_use_rs256_and_ps256_in_the_same_server(self):
+        server = ServerProcess("config-basic", configure_config=_configure_mixed_signing)
+        try:
+            server.start()
+            status, discovery = http_get_json(
+                f"{server.base_url}/.well-known/openid-configuration"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(discovery["id_token_signing_alg_values_supported"], ["RS256", "PS256"])
+            status, jwks = http_get_json(f"{server.base_url}/jwks.json")
+            self.assertEqual(status, 200)
+            self.assertEqual(len(jwks["keys"]), 2)
+            self.assertEqual(len({key["kid"] for key in jwks["keys"]}), 2)
+            for client_id, algorithm in [("svc-a", "RS256"), ("svc-pss", "PS256")]:
+                with self.subTest(client_id=client_id):
+                    status, token = http_post_form(f"{server.base_url}/oauth/token", {
+                        "grant_type": "client_credentials",
+                        "client_id": client_id,
+                        "client_secret": "supersecret",
+                        "signing_algorithm": "ES256",
+                    })
+                    self.assertEqual(status, 200)
+                    header, claims = decode_jwt_unverified(token["access_token"])
+                    self.assertEqual(header["alg"], algorithm)
+                    self.assertEqual(claims["sub"], client_id)
+                    key = next(key for key in jwks["keys"] if key["kid"] == header["kid"])
+                    self.assertEqual(key["alg"], algorithm)
+        finally:
+            server.stop()
+
     def test_startup_readiness_and_token_flow(self):
         self._assert_startup_readiness_and_token_flow("RS256")
 

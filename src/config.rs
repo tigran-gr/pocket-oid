@@ -25,10 +25,15 @@ pub struct ProviderSettings {
     pub signing_algorithm: SigningAlgorithm,
     #[serde(default)]
     #[schemars(default)]
+    pub signing_key_paths: BTreeMap<SigningAlgorithm, PathBuf>,
+    #[serde(default)]
+    #[schemars(default)]
     pub login_background_color: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
 pub enum SigningAlgorithm {
     #[default]
     RS256,
@@ -58,6 +63,9 @@ impl SigningAlgorithm {
 pub struct ClientConfig {
     pub client_id: String,
     pub client_secret: String,
+    #[serde(default)]
+    #[schemars(default)]
+    pub signing_algorithm: Option<SigningAlgorithm>,
     #[serde(default)]
     #[schemars(default)]
     pub audience: Option<String>,
@@ -191,6 +199,7 @@ fn default_allowed_signing_algorithms() -> Vec<SigningAlgorithm> {
 pub struct Client {
     pub client_id: String,
     pub client_secret: String,
+    pub signing_algorithm: Option<SigningAlgorithm>,
     pub audience: Option<String>,
     pub allowed_scopes: BTreeSet<String>,
     pub metadata: BTreeMap<String, Value>,
@@ -303,6 +312,19 @@ impl LoadedConfig {
     pub fn key_path(&self) -> PathBuf {
         self.config_root.join("keys").join("signing-key.pem")
     }
+
+    pub fn key_path_for(&self, algorithm: SigningAlgorithm) -> Result<PathBuf, AppError> {
+        if let Some(path) = self.provider.signing_key_paths.get(&algorithm) {
+            return Ok(self.config_root.join(path));
+        }
+        if algorithm == self.provider.signing_algorithm {
+            return Ok(self.key_path());
+        }
+        Err(AppError::Config(format!(
+            "signing_key_paths must configure a key for client signing algorithm {}",
+            algorithm.as_str()
+        )))
+    }
 }
 
 fn build_clients(clients: Vec<ClientConfig>) -> Result<HashMap<String, Client>, AppError> {
@@ -319,6 +341,7 @@ fn build_clients(clients: Vec<ClientConfig>) -> Result<HashMap<String, Client>, 
             Client {
                 client_id: client.client_id,
                 client_secret: client.client_secret,
+                signing_algorithm: client.signing_algorithm,
                 audience: client.audience,
                 allowed_scopes: client.scopes.into_iter().collect(),
                 metadata: client.metadata,
@@ -336,6 +359,14 @@ fn build_clients(clients: Vec<ClientConfig>) -> Result<HashMap<String, Client>, 
 }
 
 fn validate_provider_settings(provider: &ProviderSettings) -> Result<(), AppError> {
+    for (algorithm, path) in &provider.signing_key_paths {
+        if path.as_os_str().is_empty() {
+            return Err(AppError::Config(format!(
+                "signing_key_paths.{} must not be empty",
+                algorithm.as_str()
+            )));
+        }
+    }
     let Some(color) = provider.login_background_color.as_deref() else {
         return Ok(());
     };
@@ -578,6 +609,32 @@ mod tests {
         ClientAuthMode, ClientConfig, UserConfig, UsersConfig, build_clients, build_users,
         build_users_from_config, validate_reauth_clients,
     };
+
+    #[test]
+    fn client_signing_override_is_optional_and_only_accepts_supported_algorithms() {
+        let mut value = serde_json::json!({"client_id": "client", "client_secret": "secret"});
+        let client: ClientConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(client.signing_algorithm.is_none());
+        value["signing_algorithm"] = serde_json::Value::Null;
+        let client: ClientConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(client.signing_algorithm.is_none());
+        for algorithm in [
+            super::SigningAlgorithm::RS256,
+            super::SigningAlgorithm::ES256,
+            super::SigningAlgorithm::PS256,
+        ] {
+            value["signing_algorithm"] = serde_json::json!(algorithm);
+            let client: ClientConfig = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(
+                build_clients(vec![client]).unwrap()["client"].signing_algorithm,
+                Some(algorithm)
+            );
+        }
+        for algorithm in ["HS256", "PS384", "none", "rs256"] {
+            value["signing_algorithm"] = serde_json::json!(algorithm);
+            assert!(serde_json::from_value::<ClientConfig>(value.clone()).is_err());
+        }
+    }
 
     #[test]
     fn upstream_signing_algorithms_default_to_rs256_and_require_a_nonempty_supported_list() {

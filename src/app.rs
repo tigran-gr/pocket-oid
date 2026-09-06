@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ops::Deref,
     path::Path,
     sync::Arc,
@@ -14,7 +14,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::{
     auth::AuthStore,
-    config::{Client, LoadedConfig, ProviderSettings, TrustedProviderConfig},
+    config::{Client, LoadedConfig, ProviderSettings, SigningAlgorithm, TrustedProviderConfig},
     crypto::{JwkSet, KeyMaterial, load_signing_key},
     error::AppError,
     handlers,
@@ -32,7 +32,7 @@ pub struct ApplicationState {
     pub trusted_providers: HashMap<String, TrustedProviderConfig>,
     pub upstream_client: UpstreamClient,
     pub token_template: TokenTemplate,
-    pub signing_key: KeyMaterial,
+    pub signing_keys: BTreeMap<SigningAlgorithm, KeyMaterial>,
     pub jwk_set: JwkSet,
     pub discovery: DiscoveryDocument,
     pub auth_store: AuthStore,
@@ -56,13 +56,13 @@ impl AppState {
     pub fn initialize(config_dir: &Path) -> Result<Self, AppError> {
         let config = LoadedConfig::load_from_directory(config_dir)
             .map_err(|err| AppError::Config(format!("failed to load configuration: {err}")))?;
-        let signing_key = load_signing_key(&config.key_path(), config.provider.signing_algorithm)?;
+        let signing_keys = load_signing_keys(&config)?;
         let jwk_set = JwkSet {
-            keys: vec![signing_key.jwk.clone()],
+            keys: signing_keys.values().map(|key| key.jwk.clone()).collect(),
         };
         let upstream_client = UpstreamClient::new()?;
         let scopes_supported = collect_scopes(&config.clients);
-        let discovery = DiscoveryDocument::new(&config.provider, &scopes_supported);
+        let discovery = DiscoveryDocument::new(&config.provider, &scopes_supported, &signing_keys);
         Ok(Self(Arc::new(ApplicationState {
             provider: config.provider,
             clients: config.clients,
@@ -70,7 +70,7 @@ impl AppState {
             trusted_providers: config.trusted_providers,
             upstream_client,
             token_template: TokenTemplate::new(config.token_template),
-            signing_key,
+            signing_keys,
             jwk_set,
             discovery,
             auth_store: AuthStore::default(),
@@ -113,7 +113,11 @@ impl Deref for AppState {
 }
 
 impl DiscoveryDocument {
-    fn new(provider: &ProviderSettings, scopes_supported: &[String]) -> Self {
+    fn new(
+        provider: &ProviderSettings,
+        scopes_supported: &[String],
+        signing_keys: &BTreeMap<SigningAlgorithm, KeyMaterial>,
+    ) -> Self {
         let issuer = provider.issuer.trim_end_matches('/').to_string();
         let authorization_endpoint = format!("{issuer}/authorize");
         let token_endpoint = format!("{issuer}/oauth/token");
@@ -130,12 +134,47 @@ impl DiscoveryDocument {
             response_types_supported: vec!["code".to_string(), "token".to_string()],
             subject_types_supported: vec!["public".to_string()],
             token_endpoint_auth_methods_supported: vec!["client_secret_post".to_string()],
-            id_token_signing_alg_values_supported: vec![
-                provider.signing_algorithm.as_str().to_string(),
-            ],
+            id_token_signing_alg_values_supported: signing_keys
+                .keys()
+                .map(|algorithm| algorithm.as_str().to_string())
+                .collect(),
             scopes_supported: scopes_supported.to_vec(),
         }
     }
+}
+
+fn load_signing_keys(
+    config: &LoadedConfig,
+) -> Result<BTreeMap<SigningAlgorithm, KeyMaterial>, AppError> {
+    let algorithms: BTreeSet<_> = std::iter::once(config.provider.signing_algorithm)
+        .chain(
+            config
+                .clients
+                .values()
+                .filter_map(|client| client.signing_algorithm),
+        )
+        .collect();
+    let mut keys = BTreeMap::new();
+    let mut key_ids = BTreeSet::new();
+    for algorithm in algorithms {
+        let path = config.key_path_for(algorithm)?;
+        let key = load_signing_key(&path, algorithm).map_err(|error| {
+            AppError::Config(format!(
+                "failed to load {} signing key from '{}': {error}",
+                algorithm.as_str(),
+                path.display()
+            ))
+        })?;
+        // Keep each public key bound to one algorithm, with an unambiguous kid.
+        if !key_ids.insert(key.kid.clone()) {
+            return Err(AppError::Config(format!(
+                "{} reuses a signing key already configured for another algorithm; use distinct keys",
+                algorithm.as_str()
+            )));
+        }
+        keys.insert(algorithm, key);
+    }
+    Ok(keys)
 }
 
 fn collect_scopes(clients: &HashMap<String, Client>) -> Vec<String> {

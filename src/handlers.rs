@@ -621,7 +621,7 @@ fn issue_token(
         .render(&context)
         .map_err(|err| ApiError::internal(anyhow::Error::new(err)))?;
 
-    let access_token = sign_token(state, &claims)?;
+    let access_token = sign_token(state, client, &claims)?;
     let id_token = if include_id_token {
         Some(build_id_token(
             state,
@@ -660,12 +660,22 @@ fn build_id_token(
         exp: expires_at.timestamp(),
         nonce,
     };
-    sign_token(state, &claims)
+    sign_token(state, client, &claims)
 }
 
-fn sign_token<T: Serialize>(state: &AppState, claims: &T) -> Result<String, ApiError> {
-    let header = state.signing_key.header();
-    jsonwebtoken::encode(&header, claims, &state.signing_key.encoding_key)
+fn sign_token<T: Serialize>(
+    state: &AppState,
+    client: &Client,
+    claims: &T,
+) -> Result<String, ApiError> {
+    let algorithm = client
+        .signing_algorithm
+        .unwrap_or(state.provider.signing_algorithm);
+    let key = state.signing_keys.get(&algorithm).ok_or_else(|| {
+        ApiError::internal(anyhow::anyhow!("client signing key is not configured"))
+    })?;
+    let header = key.header();
+    jsonwebtoken::encode(&header, claims, &key.encoding_key)
         .map_err(|err| ApiError::internal(anyhow::Error::new(err)))
 }
 
