@@ -31,14 +31,15 @@ UPSTREAM_CLIENT_SECRET = "upstream-secret"
 UPSTREAM_LOGIN_BACKGROUND_COLOR = "#4f46e5"
 
 
-def _configure_es256(config_dir):
+def _configure_signing(config_dir, algorithm):
     provider_path = config_dir / "provider.json"
     provider = json.loads(provider_path.read_text())
-    provider["signing_algorithm"] = "ES256"
+    provider["signing_algorithm"] = algorithm
     provider_path.write_text(json.dumps(provider))
-    (config_dir / "keys" / "signing-key.pem").write_bytes(
-        (FIXTURES / "keys" / "es256.pem").read_bytes()
-    )
+    if algorithm == "ES256":
+        (config_dir / "keys" / "signing-key.pem").write_bytes(
+            (FIXTURES / "keys" / "es256.pem").read_bytes()
+        )
 
 
 def _configure_manual_reauth_upstream(
@@ -121,10 +122,16 @@ class BlackBoxTests(unittest.TestCase):
     def test_es256_startup_readiness_and_token_flow(self):
         self._assert_startup_readiness_and_token_flow("ES256")
 
+    def test_ps256_startup_readiness_and_token_flow(self):
+        self._assert_startup_readiness_and_token_flow("PS256")
+
     def _assert_startup_readiness_and_token_flow(self, algorithm):
         server = ServerProcess(
             "config-basic",
-            configure_config=_configure_es256 if algorithm == "ES256" else None,
+            configure_config=(
+                None if algorithm == "RS256"
+                else lambda config_dir: _configure_signing(config_dir, algorithm)
+            ),
         )
         server.start()
         try:

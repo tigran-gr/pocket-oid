@@ -460,6 +460,11 @@ async fn completes_es256_code_flow_with_id_and_access_token_verification() {
     code_flow_with_signing(pocket_oid::config::SigningAlgorithm::ES256).await;
 }
 
+#[tokio::test]
+async fn completes_ps256_code_flow_with_id_and_access_token_verification() {
+    code_flow_with_signing(pocket_oid::config::SigningAlgorithm::PS256).await;
+}
+
 async fn code_flow_with_signing(algorithm: pocket_oid::config::SigningAlgorithm) {
     let listener = LoopbackListener::start().await;
     let redirect_uri = listener.redirect_uri();

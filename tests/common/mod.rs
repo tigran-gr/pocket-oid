@@ -85,7 +85,10 @@ pub fn verify_jwt_with_jwks_for(token: &str, jwks: &Value, issuer: &str, audienc
         .expect("matching key should exist");
 
     assert_eq!(key["alg"], serde_json::to_value(header.alg).unwrap());
-    assert!(matches!(header.alg, Algorithm::RS256 | Algorithm::ES256));
+    assert!(matches!(
+        header.alg,
+        Algorithm::RS256 | Algorithm::ES256 | Algorithm::PS256
+    ));
     let jwk = serde_json::from_value(key.clone()).expect("JWK should parse");
     let decoding_key = DecodingKey::from_jwk(&jwk).expect("JWK should load");
     let mut validation = Validation::new(header.alg);
@@ -104,7 +107,9 @@ pub async fn request(app: Router, request: Request<Body>) -> Response<Body> {
 
 pub fn signing_key_path(algorithm: SigningAlgorithm) -> PathBuf {
     match algorithm {
-        SigningAlgorithm::RS256 => fixture_config_dir("config-basic").join("keys/signing-key.pem"),
+        SigningAlgorithm::RS256 | SigningAlgorithm::PS256 => {
+            fixture_config_dir("config-basic").join("keys/signing-key.pem")
+        }
         SigningAlgorithm::ES256 => fixture_config_dir("keys").join("es256.pem"),
     }
 }

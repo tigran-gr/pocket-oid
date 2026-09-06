@@ -6,7 +6,7 @@ the root `AGENTS.md`.
 Pocket-OID is a single-crate Rust OpenID Connect provider built with Axum and
 Tokio. It supports client credentials, authorization-code authentication with
 server-rendered login and consent pages, and re-authentication through trusted
-upstream OIDC providers. It issues RS256- or ES256-signed JWTs and exposes discovery,
+upstream OIDC providers. It issues RS256-, ES256-, or PS256-signed JWTs and exposes discovery,
 JWKS, health, and readiness endpoints.
 
 Use this guide for orientation and working conventions. Verify implementation
@@ -91,11 +91,12 @@ its consent behavior is controlled by `re_auth.consent`, not `consent_mode`.
 Keep `token_template.json`'s `iss` aligned with the configured provider issuer.
 The checked-in credentials and signing keys are development fixtures.
 
-`provider.json` selects `signing_algorithm` (`RS256` by default, or `ES256`).
-Both use an unencrypted PKCS#8 `keys/signing-key.pem`; ES256 requires P-256.
+`provider.json` selects `signing_algorithm` (`RS256` by default, `ES256`, or `PS256`).
+All use an unencrypted PKCS#8 `keys/signing-key.pem`; ES256 requires P-256,
+and PS256 requires RSA with at least 2048 bits.
 Discovery and JWKS describe only the active signing algorithm and key.
 Trusted providers separately set `allowed_signing_algorithms`, defaulting to
-`["RS256"]`; ES256 upstream validation must be explicitly enabled. Preserve
+`["RS256"]`; ES256 and PS256 upstream validation must be explicitly enabled. Preserve
 algorithm, key-type, curve, and key-usage checks when extending verification.
 
 Invalid configuration intentionally fails at startup. The fixture

@@ -61,15 +61,23 @@ pub fn load_signing_key(
 ) -> Result<KeyMaterial, AppError> {
     let pem = std::fs::read_to_string(path)?;
     match algorithm {
-        SigningAlgorithm::RS256 => load_rsa_key(&pem),
+        SigningAlgorithm::RS256 | SigningAlgorithm::PS256 => load_rsa_key(&pem, algorithm),
         SigningAlgorithm::ES256 => load_ec_key(&pem),
     }
 }
 
-fn load_rsa_key(pem: &str) -> Result<KeyMaterial, AppError> {
+fn load_rsa_key(pem: &str, algorithm: SigningAlgorithm) -> Result<KeyMaterial, AppError> {
     let private_key = RsaPrivateKey::from_pkcs8_pem(pem).map_err(|err| {
-        AppError::Crypto(format!("RS256 requires a PKCS#8 RSA private key: {err}"))
+        AppError::Crypto(format!(
+            "{} requires a PKCS#8 RSA private key: {err}",
+            algorithm.as_str()
+        ))
     })?;
+    if algorithm == SigningAlgorithm::PS256 && private_key.n().bits() < 2048 {
+        return Err(AppError::Crypto(
+            "PS256 requires an RSA key of at least 2048 bits".into(),
+        ));
+    }
     let encoding_key = EncodingKey::from_rsa_pem(pem.as_bytes())
         .map_err(|err| AppError::Crypto(format!("failed to load encoding key: {err}")))?;
     let modulus = private_key.n().to_bytes_be();
@@ -77,7 +85,7 @@ fn load_rsa_key(pem: &str) -> Result<KeyMaterial, AppError> {
     let kid = build_kid(&modulus);
     let jwk = Jwk {
         key_use: "sig".to_string(),
-        alg: "RS256".to_string(),
+        alg: algorithm.as_str().to_string(),
         kid: kid.clone(),
         public_key: JwkPublicKey::Rsa {
             n: URL_SAFE_NO_PAD.encode(modulus),
@@ -87,7 +95,7 @@ fn load_rsa_key(pem: &str) -> Result<KeyMaterial, AppError> {
     Ok(KeyMaterial {
         kid,
         encoding_key: Arc::new(encoding_key),
-        algorithm: Algorithm::RS256,
+        algorithm: algorithm.jwt_algorithm(),
         jwk,
     })
 }

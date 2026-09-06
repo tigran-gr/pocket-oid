@@ -1,6 +1,6 @@
 # pocket-oid
 
-`pocket-oid` is a small OpenID Connect provider. It issues RS256- or ES256-signed JWTs
+`pocket-oid` is a small OpenID Connect provider. It issues RS256-, ES256-, or PS256-signed JWTs
 for the client-credentials and authorization-code flows and exposes discovery,
 JWKS, health, and readiness endpoints. It also supports OIDC identity brokering
 through its re-authentication (`re_auth`) mode.
@@ -87,7 +87,7 @@ secrets with appropriate filesystem permissions.
 
 ### Token signing
 
-`provider.json` accepts `signing_algorithm`: `"RS256"` (the default) or `"ES256"`.
+`provider.json` accepts `signing_algorithm`: `"RS256"` (the default), `"ES256"`, or `"PS256"`.
 The selected algorithm signs both access tokens and ID tokens. Discovery advertises
 that algorithm, and `/jwks.json` publishes its matching public key.
 
@@ -110,8 +110,25 @@ base64url-encoded `x` and `y` coordinates. ES256 signatures use the standard JWT
 match the configured algorithm are rejected at startup. RS256 continues to use
 an unencrypted PKCS#8 RSA private key.
 
-One signing key and algorithm are active at a time. Replacing the key immediately
-changes the published JWKS after restart; old verification keys are not retained.
+For PS256 (RSA-PSS with SHA-256), set:
+
+```json
+"signing_algorithm": "PS256"
+```
+
+Use an unencrypted PKCS#8 RSA private key of at least 2048 bits at
+`keys/signing-key.pem`; an existing compatible RS256 key can be used. To generate
+a new key:
+
+```sh
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out ps256-key.pem
+```
+
+Install it as `keys/signing-key.pem` and restart. PS256 publishes an RSA JWK with
+`alg: "PS256"`, `n`, and `e`. Keys shorter than 2048 bits are rejected at startup.
+
+One signing key and algorithm are active at a time. Changing either updates the
+published JWKS after restart; old verification keys are not retained.
 Coordinate a change with token consumers and the lifetime of previously issued tokens.
 
 ## Re-authentication (identity brokering)
@@ -151,9 +168,11 @@ Upstream ID tokens use a separate algorithm policy. Each entry in
 "allowed_signing_algorithms": ["ES256"]
 ```
 
-Use `["RS256", "ES256"]` when that upstream needs both. The list must be nonempty;
-other algorithms are rejected. The token's algorithm must be allowed and match
+For a PS256 upstream, use `["PS256"]`. Multiple algorithms can be allowed, for
+example `["RS256", "ES256", "PS256"]`. The list must be nonempty and contain only
+these supported algorithms. The token's algorithm must be allowed and match
 its JWKS key type, curve, and any declared algorithm or verification usage.
+RS256 and PS256 are distinct algorithms even though both use RSA keys.
 This setting is independent of Pocket-OID's own `signing_algorithm`.
 
 Local consent is shown by default; `re_auth.consent: "skip"` omits that screen.

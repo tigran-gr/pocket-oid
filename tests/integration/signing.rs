@@ -3,6 +3,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{Algorithm, decode_header};
 use pocket_oid::{app::AppState, config::SigningAlgorithm};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::fs;
 
 use crate::common::{
@@ -65,6 +66,69 @@ async fn es256_access_token_verifies_using_published_ec_jwk() {
     assert_eq!(claims["custom"]["tenant"], "acme");
 }
 
+#[tokio::test]
+async fn ps256_access_token_verifies_using_published_rsa_jwk_and_pss_padding() {
+    let config = SigningTestConfig::new(SigningAlgorithm::PS256);
+    let app = AppState::initialize(&config.path).unwrap().router();
+    let (status, discovery) = get_json(app.clone(), "/.well-known/openid-configuration").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        discovery["id_token_signing_alg_values_supported"],
+        json!(["PS256"])
+    );
+    let (status, jwks) = get_json(app.clone(), "/jwks.json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(jwks["keys"].as_array().unwrap().len(), 1);
+    let key = &jwks["keys"][0];
+    assert_eq!(key["kty"], "RSA");
+    assert_eq!(key["alg"], "PS256");
+    assert_eq!(key["use"], "sig");
+    for absent in ["crv", "x", "y", "d", "p", "q"] {
+        assert!(key.get(absent).is_none(), "unexpected key field {absent}");
+    }
+    let (status, response) = post_token_form(
+        app,
+        "grant_type=client_credentials&client_id=svc-a&client_secret=supersecret",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = response["access_token"].as_str().unwrap();
+    assert_eq!(decode_header(token).unwrap().alg, Algorithm::PS256);
+    let claims = verify_jwt_with_jwks(token, &jwks);
+    assert_eq!(claims["sub"], "svc-a");
+    assert_eq!(claims["scope"], "default");
+
+    // Verify with RustCrypto as well as jsonwebtoken/ring, enforcing the JOSE
+    // PS256 parameters: SHA-256, MGF1-SHA256, and a 32-byte salt.
+    let public_key = rsa::RsaPublicKey::new(
+        rsa::BigUint::from_bytes_be(&URL_SAFE_NO_PAD.decode(key["n"].as_str().unwrap()).unwrap()),
+        rsa::BigUint::from_bytes_be(&URL_SAFE_NO_PAD.decode(key["e"].as_str().unwrap()).unwrap()),
+    )
+    .unwrap();
+    let (signing_input, signature) = token.rsplit_once('.').unwrap();
+    public_key
+        .verify(
+            rsa::Pss::new_with_salt::<Sha256>(32),
+            &Sha256::digest(signing_input.as_bytes()),
+            &URL_SAFE_NO_PAD.decode(signature).unwrap(),
+        )
+        .expect("token must use PS256 padding and salt length");
+}
+
+#[test]
+fn ps256_rejects_rsa_keys_shorter_than_2048_bits_at_startup() {
+    let config = SigningTestConfig::new(SigningAlgorithm::PS256);
+    fs::copy(
+        fixture_config_dir("keys").join("rsa1024.pem"),
+        config.path.join("keys/signing-key.pem"),
+    )
+    .unwrap();
+    let error = AppState::initialize(&config.path)
+        .err()
+        .expect("weak test key must fail startup");
+    assert!(error.to_string().contains("at least 2048 bits"), "{error}");
+}
+
 #[test]
 fn startup_rejects_keys_that_do_not_match_the_signing_algorithm() {
     for (algorithm, key, expected) in [
@@ -83,6 +147,11 @@ fn startup_rejects_keys_that_do_not_match_the_signing_algorithm() {
             fixture_config_dir("keys").join("es256.pem"),
             "RSA",
         ),
+        (
+            SigningAlgorithm::PS256,
+            fixture_config_dir("keys").join("es256.pem"),
+            "RSA",
+        ),
     ] {
         let config = SigningTestConfig::new(algorithm);
         fs::copy(key, config.path.join("keys/signing-key.pem")).unwrap();
@@ -98,7 +167,7 @@ fn startup_rejects_unsupported_signing_algorithms_and_invalid_ec_pem() {
     let config = SigningTestConfig::new(SigningAlgorithm::ES256);
     let provider_path = config.path.join("provider.json");
     let mut provider: Value = serde_json::from_slice(&fs::read(&provider_path).unwrap()).unwrap();
-    for algorithm in ["HS256", "ES384", "PS256", "none"] {
+    for algorithm in ["HS256", "ES384", "PS384", "none"] {
         provider["signing_algorithm"] = json!(algorithm);
         fs::write(&provider_path, serde_json::to_vec(&provider).unwrap()).unwrap();
         assert!(

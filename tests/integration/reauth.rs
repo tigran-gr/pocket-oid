@@ -268,6 +268,16 @@ async fn reauth_accepts_rs256_upstream_and_issues_es256_downstream() {
     reauth_skip_consent_with_signing(SigningAlgorithm::RS256, SigningAlgorithm::ES256).await;
 }
 
+#[tokio::test]
+async fn reauth_accepts_ps256_upstream_and_issues_rs256_downstream() {
+    reauth_skip_consent_with_signing(SigningAlgorithm::PS256, SigningAlgorithm::RS256).await;
+}
+
+#[tokio::test]
+async fn reauth_accepts_es256_upstream_and_issues_ps256_downstream() {
+    reauth_skip_consent_with_signing(SigningAlgorithm::ES256, SigningAlgorithm::PS256).await;
+}
+
 async fn reauth_skip_consent_with_signing(
     upstream_algorithm: SigningAlgorithm,
     downstream_algorithm: SigningAlgorithm,
@@ -381,8 +391,16 @@ async fn invalid_upstream_state_does_not_issue_a_code_or_contact_the_provider() 
 
 #[tokio::test]
 async fn es256_upstream_validation_rejects_disallowed_algorithms_bad_signatures_and_claims() {
-    let Some(upstream) = MockOidcProvider::start_with_algorithm(SigningAlgorithm::ES256).await
-    else {
+    upstream_validation_rejects_invalid_tokens(SigningAlgorithm::ES256).await;
+}
+
+#[tokio::test]
+async fn ps256_upstream_validation_rejects_disallowed_algorithms_bad_signatures_and_claims() {
+    upstream_validation_rejects_invalid_tokens(SigningAlgorithm::PS256).await;
+}
+
+async fn upstream_validation_rejects_invalid_tokens(algorithm: SigningAlgorithm) {
+    let Some(upstream) = MockOidcProvider::start_with_algorithm(algorithm).await else {
         return;
     };
     let config = TempReauthConfig::new(&upstream.issuer);
@@ -414,7 +432,7 @@ async fn es256_upstream_validation_rejects_disallowed_algorithms_bad_signatures_
         .await
         .unwrap_err();
     assert!(error.to_string().contains("not allowed"));
-    provider.allowed_signing_algorithms = vec![SigningAlgorithm::ES256];
+    provider.allowed_signing_algorithms = vec![algorithm];
     let identity = state
         .upstream_client
         .validate_id_token(&metadata, &provider, &token, nonce)
@@ -460,20 +478,34 @@ async fn es256_upstream_validation_rejects_disallowed_algorithms_bad_signatures_
             .is_err()
     );
 
-    // A correctly signed ES256 token is still invalid with an incompatible JWKS key.
+    // A correctly signed token is still invalid with an incompatible JWKS key.
     let valid_jwk = serde_json::to_value(&upstream.state.signing_key.jwk).unwrap();
-    for (field, value) in [
-        ("crv", json!("P-384")),
+    let mut invalid_key_fields = vec![
         ("alg", json!("RS256")),
         ("kid", json!("unknown-key")),
-        (
-            "x",
-            json!(base64::Engine::encode(
-                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-                [0; 32]
-            )),
-        ),
-    ] {
+        ("use", json!("enc")),
+        ("key_ops", json!(["sign"])),
+    ];
+    if algorithm == SigningAlgorithm::ES256 {
+        invalid_key_fields.extend([
+            ("crv", json!("P-384")),
+            ("kty", json!("RSA")),
+            (
+                "x",
+                json!(base64::Engine::encode(
+                    &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                    [0; 32]
+                )),
+            ),
+        ]);
+    } else {
+        invalid_key_fields.extend([
+            ("kty", json!("EC")),
+            ("n", json!("invalid!")),
+            ("e", Value::Null),
+        ]);
+    }
+    for (field, value) in invalid_key_fields {
         let mut invalid = valid_jwk.clone();
         invalid[field] = value;
         *upstream.state.jwks_override.lock().unwrap() = Some(json!({"keys": [invalid]}));
@@ -484,6 +516,29 @@ async fn es256_upstream_validation_rejects_disallowed_algorithms_bad_signatures_
                 .await
                 .is_err(),
             "accepted incompatible {field}"
+        );
+    }
+    if algorithm == SigningAlgorithm::PS256 {
+        // Even without a JWK alg restriction, PS256-only policy must reject RS256.
+        let mut key_without_alg = valid_jwk;
+        key_without_alg.as_object_mut().unwrap().remove("alg");
+        *upstream.state.jwks_override.lock().unwrap() = Some(json!({"keys": [key_without_alg]}));
+        let mut header = upstream.state.signing_key.header();
+        header.alg = jsonwebtoken::Algorithm::RS256;
+        let rs256_token =
+            encode(&header, &claims, &upstream.state.signing_key.encoding_key).unwrap();
+        let error = state
+            .upstream_client
+            .validate_id_token(&metadata, &provider, &rs256_token, nonce)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("not allowed"));
+        assert!(
+            state
+                .upstream_client
+                .validate_id_token(&metadata, &provider, &token, nonce)
+                .await
+                .is_ok()
         );
     }
     upstream.stop().await;

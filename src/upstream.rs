@@ -80,6 +80,7 @@ impl RemoteJwk {
         let algorithm_name = match algorithm {
             Algorithm::RS256 => "RS256",
             Algorithm::ES256 => "ES256",
+            Algorithm::PS256 => "PS256",
             _ => bail!("unsupported upstream signing algorithm"),
         };
         if !matches!(self.key_use.as_deref(), None | Some("sig"))
@@ -92,9 +93,9 @@ impl RemoteJwk {
             bail!("upstream JWKS key is not a {algorithm_name} verification key");
         }
         match algorithm {
-            Algorithm::RS256 => {
+            Algorithm::RS256 | Algorithm::PS256 => {
                 if self.kty.as_deref() != Some("RSA") {
-                    bail!("upstream RS256 key must have kty RSA");
+                    bail!("upstream {algorithm_name} key must have kty RSA");
                 }
                 let modulus = self
                     .n

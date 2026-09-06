@@ -33,6 +33,7 @@ pub enum SigningAlgorithm {
     #[default]
     RS256,
     ES256,
+    PS256,
 }
 
 impl SigningAlgorithm {
@@ -40,6 +41,7 @@ impl SigningAlgorithm {
         match self {
             Self::RS256 => "RS256",
             Self::ES256 => "ES256",
+            Self::PS256 => "PS256",
         }
     }
 
@@ -47,6 +49,7 @@ impl SigningAlgorithm {
         match self {
             Self::RS256 => jsonwebtoken::Algorithm::RS256,
             Self::ES256 => jsonwebtoken::Algorithm::ES256,
+            Self::PS256 => jsonwebtoken::Algorithm::PS256,
         }
     }
 }
@@ -592,7 +595,7 @@ mod tests {
             vec![SigningAlgorithm::RS256]
         );
 
-        config["allowed_signing_algorithms"] = serde_json::json!(["RS256", "ES256"]);
+        config["allowed_signing_algorithms"] = serde_json::json!(["RS256", "ES256", "PS256"]);
         let provider: TrustedProviderConfig = serde_json::from_value(config.clone()).unwrap();
         validate_trusted_provider(&provider).unwrap();
 
