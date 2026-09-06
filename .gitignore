@@ -12,3 +12,5 @@ __pycache__/
 # Downloaded by tools/keycloak/ensure-keycloak.sh; the helper and its VERSION stay tracked.
 /tools/keycloak/archive/
 /tools/keycloak/dist/
+
+.vscode/settings.json
