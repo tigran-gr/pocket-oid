@@ -1,4 +1,4 @@
-name: Rust
+name: CI
 
 on:
   push:
@@ -20,3 +20,10 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+    - name: Run ordinary black-box tests
+      env:
+        POCKET_OID_MANUAL_CODE_FLOW: "0"
+        POCKET_OID_MANUAL_REAUTH: "0"
+        POCKET_OID_MANUAL_KEYCLOAK_REAUTH: "0"
+        POCKET_OID_SELENIUM_CODE_FLOW: "0"
+      run: python3 -m unittest discover -s tests_blackbox -v

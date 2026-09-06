@@ -1,4 +1,4 @@
-# Black-box browser tests
+# Black-box tests
 
 The standard black-box suite uses Python's standard library:
 
@@ -14,6 +14,11 @@ python3 -m unittest discover -s tests_blackbox -v
 
 The Selenium and manual-browser tests remain skipped during discovery unless
 their opt-in environment variables are set.
+
+GitHub Actions runs the discovery command above after the Rust build and test
+suite. CI explicitly disables all Selenium and manual-browser opt-in flags, so
+it needs only Python 3 and the Rust toolchain; browser drivers, Selenium, and
+Keycloak are not installed or run.
 
 ## Retaining Pocket-OID logs
 
