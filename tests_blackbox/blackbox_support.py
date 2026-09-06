@@ -290,10 +290,13 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 
 
 class ServerProcess:
-    def __init__(self, fixture_name: str, configure_config=None):
+    def __init__(self, fixture_name: str, configure_config=None, capture_output=False):
         self.fixture_name = fixture_name
         self.configure_config = configure_config
+        self.capture_output = capture_output
         self.process = None
+        self.stdout = None
+        self.stderr = None
         self.config_dir = None
         self.port = _pick_free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
@@ -311,6 +314,12 @@ class ServerProcess:
         if self.configure_config is not None:
             self.configure_config(self.config_dir)
 
+        log_dir = os.environ.get("POCKET_OID_TEST_LOG_DIR")
+        if log_dir:
+            provider = json.loads(provider_path.read_text())
+            provider.setdefault("log_dir", str(Path(log_dir).expanduser().resolve()))
+            provider_path.write_text(json.dumps(provider))
+
         print(f"Starting server with config from {self.config_dir} on port {port}")
 
         env = os.environ.copy()
@@ -319,8 +328,9 @@ class ServerProcess:
             ["cargo", "run", "--quiet"],
             cwd=ROOT,
             env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if self.capture_output else subprocess.DEVNULL,
+            stderr=subprocess.PIPE if self.capture_output else subprocess.DEVNULL,
+            text=self.capture_output,
         )
 
         deadline = time.time() + 15
@@ -344,6 +354,12 @@ class ServerProcess:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.process.kill()
+                self.process.wait(timeout=5)
+        if self.capture_output and self.process is not None:
+            self.stdout = self.process.stdout.read()
+            self.stderr = self.process.stderr.read()
+            self.process.stdout.close()
+            self.process.stderr.close()
         if self.config_dir is not None:
             shutil.rmtree(self.config_dir, ignore_errors=True)
 

@@ -2,10 +2,14 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import time
 import unittest
 import webbrowser
+from pathlib import Path
+from unittest.mock import patch
 
 from tests_blackbox.blackbox_support import (
     FIXTURES,
@@ -517,20 +521,108 @@ class BlackBoxTests(unittest.TestCase):
 
     def test_startup_fails_with_invalid_config(self):
         config_dir = FIXTURES / "config-invalid-clients"
+        temporary_config = None
+        log_dir_value = os.environ.get("POCKET_OID_TEST_LOG_DIR")
+        previous_logs = set()
+        if log_dir_value:
+            log_dir = Path(log_dir_value).expanduser().resolve()
+            log_dir.mkdir(parents=True, exist_ok=True)
+            previous_logs = set(log_dir.glob("pocket-oid-*.log"))
+            temporary_config = tempfile.TemporaryDirectory(
+                prefix="pocket-oid-invalid-config-"
+            )
+            config_dir = Path(temporary_config.name)
+            shutil.copytree(
+                FIXTURES / "config-invalid-clients", config_dir, dirs_exist_ok=True
+            )
+            provider_path = config_dir / "provider.json"
+            provider = json.loads(provider_path.read_text())
+            provider["log_dir"] = str(log_dir)
+            provider_path.write_text(json.dumps(provider))
+
         env = os.environ.copy()
         env["POCKET_OID_CONFIG_DIR"] = str(config_dir)
 
-        process = subprocess.run(
-            ["cargo", "run", "--quiet"],
-            cwd=ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
+        try:
+            process = subprocess.run(
+                ["cargo", "run", "--quiet"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        finally:
+            if temporary_config is not None:
+                temporary_config.cleanup()
 
         self.assertNotEqual(process.returncode, 0)
-        self.assertIn("failed to initialize provider", process.stderr)
+        if log_dir_value:
+            self.assertEqual(process.stdout, "")
+            self.assertEqual(process.stderr, "")
+            new_logs = set(log_dir.glob("pocket-oid-*.log")) - previous_logs
+            self.assertEqual(len(new_logs), 1)
+            log = new_logs.pop().read_text()
+            self.assertIn("failed to initialize provider", log)
+            self.assertNotIn("\x1b", log)
+        else:
+            self.assertIn("failed to initialize provider", process.stderr)
+
+    def test_configured_log_dir_writes_plain_file_without_standard_output(self):
+        with tempfile.TemporaryDirectory(prefix="pocket-oid-file-logging-") as directory:
+            log_dir = Path(directory) / "logs"
+
+            def configure(config_dir):
+                provider_path = config_dir / "provider.json"
+                provider = json.loads(provider_path.read_text())
+                provider["log_dir"] = str(log_dir)
+                provider_path.write_text(json.dumps(provider))
+
+            server = ServerProcess(
+                "config-basic", configure_config=configure, capture_output=True
+            )
+            with patch.dict(os.environ, {"RUST_LOG": "info"}):
+                server.start()
+                server.stop()
+
+            self.assertEqual(server.stdout, "")
+            self.assertEqual(server.stderr, "")
+            logs = list(log_dir.glob("pocket-oid-*.log"))
+            self.assertEqual(len(logs), 1)
+            log = logs[0].read_text()
+            self.assertIn("starting pocket-oid", log)
+            self.assertNotIn("\x1b", log)
+
+            invalid_config = Path(directory) / "invalid-config"
+            shutil.copytree(FIXTURES / "config-invalid-clients", invalid_config)
+            provider_path = invalid_config / "provider.json"
+            provider = json.loads(provider_path.read_text())
+            provider["log_dir"] = str(log_dir)
+            provider_path.write_text(json.dumps(provider))
+            env = os.environ.copy()
+            env["POCKET_OID_CONFIG_DIR"] = str(invalid_config)
+            env["RUST_LOG"] = "info"
+
+            failed = subprocess.run(
+                ["cargo", "run", "--quiet"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(failed.stdout, "")
+            self.assertEqual(failed.stderr, "")
+            logs = list(log_dir.glob("pocket-oid-*.log"))
+            self.assertEqual(len(logs), 2)
+            failed_log = next(
+                path.read_text()
+                for path in logs
+                if "failed to initialize provider" in path.read_text()
+            )
+            self.assertNotIn("\x1b", failed_log)
 
 
 if __name__ == "__main__":

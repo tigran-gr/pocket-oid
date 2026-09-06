@@ -262,8 +262,20 @@ that public URL to this process.
 
 ## Logs
 
-Logs go to standard error. Set `RUST_LOG` to control verbosity:
+By default, logs go to standard error with terminal colors. Set `RUST_LOG` to
+control verbosity:
 
 ```sh
 RUST_LOG=debug pocket-oid
 ```
+
+To write logs to files instead, set `log_dir` in `provider.json`:
+
+```json
+"log_dir": "logs"
+```
+
+Relative paths resolve from the configuration directory; absolute paths are
+used as written. Pocket-OID creates the directory when needed and writes each
+process to a uniquely named, plain-text `.log` file. When `log_dir` is set,
+Pocket-OID does not also write logs to standard error.

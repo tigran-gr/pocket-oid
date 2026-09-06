@@ -22,6 +22,9 @@ pub struct ProviderSettings {
     pub listen: String,
     #[serde(default)]
     #[schemars(default)]
+    pub log_dir: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(default)]
     pub signing_algorithm: SigningAlgorithm,
     #[serde(default)]
     #[schemars(default)]
@@ -359,6 +362,14 @@ fn build_clients(clients: Vec<ClientConfig>) -> Result<HashMap<String, Client>, 
 }
 
 fn validate_provider_settings(provider: &ProviderSettings) -> Result<(), AppError> {
+    if provider
+        .log_dir
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        return Err(AppError::Config("log_dir must not be empty".into()));
+    }
+
     for (algorithm, path) in &provider.signing_key_paths {
         if path.as_os_str().is_empty() {
             return Err(AppError::Config(format!(

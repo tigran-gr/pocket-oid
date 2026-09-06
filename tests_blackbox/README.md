@@ -15,6 +15,26 @@ python3 -m unittest discover -s tests_blackbox -v
 The Selenium and manual-browser tests remain skipped during discovery unless
 their opt-in environment variables are set.
 
+## Retaining Pocket-OID logs
+
+Set `POCKET_OID_TEST_LOG_DIR` to add `log_dir` to each server's temporary
+`provider.json`:
+
+```sh
+POCKET_OID_TEST_LOG_DIR=target/blackbox-logs \
+  python3 -m unittest discover -s tests_blackbox -v
+```
+
+The directory is created automatically, relative to your current working
+directory. Pocket-OID creates a uniquely named, plain-text `.log` file for each
+server process. The files remain after tests finish and later runs do not
+overwrite them. This also works with the Selenium and manual tests, including
+both Pocket-OID servers in the manual re-auth flow. Keycloak logs are not
+included. Unset the variable (or leave it empty) to discard server output as
+usual. Use `RUST_LOG=debug` alongside it for more verbose Pocket-OID logs.
+
+## Selenium tests
+
 The Selenium authorization-code tests are opt-in. Install Selenium and the
 PyJWT cryptography dependencies used to verify signatures:
 
