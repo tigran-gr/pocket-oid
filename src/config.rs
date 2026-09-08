@@ -217,6 +217,7 @@ pub struct Client {
 
 #[derive(Debug, Clone)]
 pub struct LoadedConfig {
+    pub registered_clients: Vec<ClientConfig>,
     pub provider: ProviderSettings,
     pub clients: HashMap<String, Client>,
     pub users: UserStore,
@@ -233,7 +234,7 @@ impl LoadedConfig {
         let raw_clients: Value = read_json_value(root.join("clients.json"))?;
         validate_json(&schema_for!(Vec<ClientConfig>), &raw_clients)?;
         let clients_vec: Vec<ClientConfig> = serde_json::from_value(raw_clients)?;
-        let clients = build_clients(clients_vec)?;
+        let clients = build_clients(clients_vec.clone())?;
         if clients.is_empty() {
             return Err(AppError::Config("no active clients configured".into()));
         }
@@ -258,6 +259,7 @@ impl LoadedConfig {
         }
 
         Ok(Self {
+            registered_clients: clients_vec,
             provider,
             clients,
             users,

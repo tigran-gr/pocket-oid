@@ -60,6 +60,14 @@ pub struct User {
     credential: PasswordCredential,
 }
 
+/// Credential-free projection for the administrator console.
+#[derive(Debug, Clone)]
+pub struct UserSummary {
+    pub id: String,
+    pub username: String,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone)]
 enum PasswordCredential {
     Argon2id { phc: String },
@@ -87,6 +95,45 @@ struct SqliteUserStore {
 }
 
 impl UserStore {
+    pub fn source_name(&self) -> &'static str {
+        match self.backend {
+            UserStoreBackend::File(_) => "JSON",
+            UserStoreBackend::Sqlite(_) => "SQLite",
+        }
+    }
+
+    pub fn list(&self) -> anyhow::Result<Vec<UserSummary>> {
+        let mut users = match &self.backend {
+            UserStoreBackend::File(users) => users
+                .values()
+                .map(|user| UserSummary {
+                    id: user.id.clone(),
+                    username: user.username.clone(),
+                    enabled: true,
+                })
+                .collect::<Vec<_>>(),
+            UserStoreBackend::Sqlite(store) => {
+                let connection = store
+                    .connection
+                    .lock()
+                    .map_err(|_| anyhow!("sqlite users database lock is poisoned"))?;
+                let mut statement =
+                    connection.prepare("SELECT id, username, enabled FROM users")?;
+                statement
+                    .query_map([], |row| {
+                        Ok(UserSummary {
+                            id: row.get(0)?,
+                            username: row.get(1)?,
+                            enabled: row.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+        };
+        users.sort_by(|a, b| a.username.cmp(&b.username));
+        Ok(users)
+    }
+
     pub fn load(config: UsersConfig, config_root: &Path) -> Result<Self, AppError> {
         let dummy_credential = create_dummy_credential()?;
         let backend = match config {

@@ -1,0 +1,4 @@
+{
+  "provider": "sqlite",
+  "path": "data/admins.sqlite3"
+}

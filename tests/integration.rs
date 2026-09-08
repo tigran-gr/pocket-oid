@@ -1,5 +1,8 @@
 mod common;
 
+#[path = "integration/admin_console.rs"]
+mod admin_console;
+
 #[path = "integration/code_flow.rs"]
 mod code_flow;
 #[path = "integration/health.rs"]

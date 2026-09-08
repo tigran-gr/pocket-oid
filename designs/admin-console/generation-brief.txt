@@ -1,0 +1,51 @@
+Generated with the built-in Image Gen tool. References: assets/pocket-oid-logo.svg (rendered to PNG) and assets/login-page.jpg.
+
+Create a high-fidelity product-design presentation sheet for ONE cohesive Pocket-OID admin console direction. NOT a dashboard concept collage of unrelated styles. Canvas 3840 x 2160 landscape, crisp readable polished UI suitable for zooming. Use four large complete desktop screens arranged 2 by 2 on the left 3200px; a 560px-wide design-support column on the right. Each desktop screen approximately 1536 x 900 with generous margins. Small editorial labels OUTSIDE frames identify views. Thin gray frame borders only, no device chrome or shadows. All screens one coherent design system.
+
+SOURCE REFERENCES: attached PNG is exact raster rendering of user's assets/pocket-oid-logo.svg, use actual logo faithfully at 160px wide in sidebar. Attached login-page.jpg supplies typography personality, restrained teal, light mood. Adapt to admin information density; don't reproduce the centered login card. Preserve logo's own gradient but NO decorative gradients anywhere else.
+STYLE: professional trustworthy calm practical minimal; white surfaces, #E1E6E8 borders, #F7F9F9 subdued sidebar, dark #172B32 readable text, gray #52636B secondary text, #0F766E teal actions/selection. Body 14–16px at natural desktop scale, page title 24px semibold, compact 52px table rows. No enormous headings, metrics, charts, dashboard widgets, nested cards or decoration. Use whitespace, alignment, dividers; no needless bounding boxes.
+SCOPE STRICT: ALL THREE SECTIONS READ ONLY. Only navigation, search, copy, retry, clear search, detail links, account menu, sign out. NO create/edit/delete/save controls, toggles, plus icons, row action menus, secret reveal, or selection checkboxes. No Overview, extra nav, admin management or trusted-provider section.
+COMMON SHELL: persistent 224px left sidebar, logo above small 'Admin console' caption. EXACTLY three navigation items: 'Client applications', 'Users', 'Provider settings'. Client applications selected by default. Compact header with section title + one sentence description. Discreet top-right 'admin' menu with chevron, no avatar/photo. Small read-only label, no giant warning.
+
+TOP LEFT — LANDING, Client applications. Description 'Inspect registered applications and their authentication settings.' Search 'Search client ID or scope'. Table EXACT columns Client ID / Status / Authentication / Scopes. Row IDs are links and rows have subtle hover. Six rows:
+portal-web | Enabled | Local | openid, default
+partner-portal | Enabled | Upstream | openid, default, partners:read, partners:write
+orders-api | Enabled | Local | orders:read, orders:write
+ops-cli | Enabled | Local | openid, default
+legacy-web | Disabled | Local | openid
+sandbox-client | Disabled | Local | default
+Enabled with small check icon and text, Disabled with minus-in-circle and text, restrained muted badges. Display all scope names or wrap; do not truncate with '+3'. Modest '6 applications · includes disabled clients' result count, not a dashboard metric.
+
+TOP RIGHT — representative CLIENT DETAIL partner-portal. Same shell, Client applications stays selected. Breadcrumb back 'Client applications / partner-portal'. Description 'Registered client configuration.' Enabled and Upstream text labels. Readable labeled groups with horizontal separators:
+Identity: Client ID partner-portal [Copy]; Audience https://api.example.com/partners [Copy].
+Redirect URLs: https://partners.example.com/auth/callback ; https://staging.partners.example.com/oidc/authorization/callback [Copy each]. Wrap long URLs without ellipsis. Monospace only for values.
+Scopes: openid, default, partners:read, partners:write [Copy all].
+Authentication: PKCE Required; Consent Show local consent; Trusted provider corp-oidc (reference text, not link to a nonexistent section); Upstream scopes openid.
+Tokens: Signing algorithm RS256 · Inherited from provider; Token lifetime 3,600 seconds (1 hour) · Inherited from provider.
+Never show client secrets, not even masked placeholders. Never conflate local consent_mode and re-auth consent; this Upstream client's policy is local consent.
+
+BOTTOM LEFT — USERS, same shell Users selected. Header 'Users', description 'Local application users. Administrator accounts and upstream identities are separate.' Fixed metadata label 'User source: SQLite' (NOT a picker). Search 'Search username or user ID'. Table Username / User ID / Status:
+alice | user-alice | Enabled
+bob | user-bob | Enabled
+carol | user-carol | Disabled
+dave | user-dave | Enabled
+Show a simple user detail panel for selected alice with ONLY Username alice, User ID user-alice with Copy, Status Enabled, User source SQLite, close button. No photo, email, last login, timestamps, roles, passwords, hashes or admin identity mixed into the list. Show row selected.
+
+BOTTOM RIGHT — PROVIDER SETTINGS, same shell selected. Header 'Provider settings', description 'Current provider configuration.' Read-only grouped definition rows:
+Identity — Provider name Pocket-OID; Issuer URL https://id.example.com [Copy]
+Tokens — Default signing algorithm RS256; Default token lifetime 3,600 seconds (1 hour)
+Login appearance — Background color #F2F8F7 [Copy]; small pale-color swatch and compact preview of white login panel on this color. This is a preview, not another settings card. No color picker, inputs, toggles or save.
+Open the admin account menu discreetly on this screen showing 'Signed in as admin' and 'Sign out'. No extra menu options.
+
+RIGHT DESIGN-SUPPORT COLUMN (outside product UI, not a product sidebar):
+Heading 'Responsive & states'. One 390x650 narrow-screen client-list mock: compact logo/header, Menu button to open same three-item navigation drawer, stacked list rows labeled Status/Authentication/Scopes, client ID links; do not hide important data. Show 2 sample clients.
+Four small finished state specimens below it, using plain compact empty-state regions:
+Loading: three skeleton rows, 'Loading applications…'
+Empty: 'No client applications configured.' / 'Configured applications will appear here.' no create CTA.
+No results: 'No matches for “billing”' and 'Clear search'.
+Error: 'Could not load applications.' / 'Try again.' with Retry button; must not imply empty data.
+Then small focus specimen: teal 2px visible focus ring around a client link, note 'Keyboard focus'; copy feedback 'Copied'; status specimens check Enabled / minus Disabled.
+Use real labels and readable text; include no irrelevant content. Outside UI a tiny footer 'Sample configuration · read-only design'. All data are realistic mock values, not actual deployment state.
+
+Displayed order: option-1.png = Quiet Ledger; option-2.png = Structured Workspace; option-3.png = Context Inspector.
+

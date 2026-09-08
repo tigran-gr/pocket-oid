@@ -12,10 +12,12 @@ chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive"] }
 jsonwebtoken = "9"
 jsonschema = "0.17"
+leptos = { version = "0.8.20", features = ["ssr"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
 ring = "0.17"
 rsa = { version = "0.9", features = ["pem"] }
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+rpassword = "7"
 rusqlite = { version = "0.40", features = ["bundled"] }
 schemars = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -29,6 +31,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 url = "2"
+zeroize = "1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

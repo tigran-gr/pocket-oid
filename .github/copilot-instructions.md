@@ -31,6 +31,11 @@ Source layout:
 - `src/config.rs`: config loading, schema and semantic validation, registered
   clients, and trusted providers.
 - `src/users.rs`: file and SQLite user repositories plus password verification.
+- `src/admins.rs`: dedicated SQLite administrator repository and password creation.
+- `src/admin_console/`: authenticated, read-only Leptos SSR console at `/admin`,
+  with independent in-memory sessions and credential-free views of configuration.
+- `assets/admin/`: embedded console CSS, enhancement JavaScript, fonts, and icons;
+  no separate frontend build is needed.
 - `src/handlers.rs`: token exchange, authorization, local login/consent,
   re-auth callback/consent, and metadata/health handlers.
 - `src/auth.rs`: in-memory sessions, authorization codes, and pending re-auth

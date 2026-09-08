@@ -37,6 +37,70 @@ pocket-oid --help
 
 `--version` is also supported. The binary has no required positional arguments.
 
+### Manage administrators
+
+Administrator accounts are stored separately from users who authenticate to
+OIDC clients. Create an administrator using a password entered through the
+terminal's hidden prompt:
+
+```sh
+pocket-oid admin create alice
+```
+
+List all administrator accounts and their status:
+
+```sh
+pocket-oid admin list
+```
+
+Both commands use the selected configuration directory. Its `admins.json`
+chooses the administrator repository:
+
+```json
+{
+  "provider": "sqlite",
+  "path": "data/admins.sqlite3"
+}
+```
+
+Relative paths resolve against `POCKET_OID_CONFIG_DIR`. Pocket-OID creates the
+parent directory, database, and schema when either command first opens the
+store. On Unix, the database file is restricted to its owner. Run these commands
+as the operating-system account that owns the Pocket-OID configuration and data.
+
+### Administrator web console
+
+After configuring `admins.json` and creating an administrator, start Pocket-OID
+normally and open `/admin` on its HTTP listener. Sign in with the dedicated
+administrator account; ordinary OIDC users cannot access the console.
+
+The initial console is read-only:
+
+- **Client applications**: searchable registered clients, including disabled
+  entries, with redirect URLs, scopes, authentication/consent policy, and
+  effective signing algorithm and token lifetime (including inheritance).
+- **Users**: searchable local users from JSON or SQLite, with a detail panel.
+  SQLite status changes are visible without restarting. Upstream identities
+  are not a local user directory; administrators remain managed by the CLI.
+- **Provider settings**: name, issuer, token defaults, and a preview
+  of the configured login page.
+
+Pages are server-rendered with Leptos inside the existing Axum application.
+CSS, fonts, icons, and a small JavaScript enhancement script are embedded in the
+binary; no Node.js build, WASM toolchain, or separate frontend server is needed.
+Client/provider configuration and JSON users reflect the startup snapshot.
+Change the configuration files and restart to update them.
+
+Administrator sessions are separate from OIDC sessions, expire after one hour,
+and are lost on restart. Login/logout use CSRF protection; cookies are HttpOnly
+and SameSite=Strict, with Secure enabled for an HTTPS issuer. Use HTTPS in
+production, keep the issuer consistent with the external URL, and restrict
+access to the admin routes at your reverse proxy where appropriate. Passwords,
+password hashes, client secrets, and private keys are never shown by the console.
+
+Without `admins.json`, the OIDC service still runs but administrator sign-in is
+unavailable. The console does not add browser-based account creation or editing.
+
 ## Configure it
 
 Set `POCKET_OID_CONFIG_DIR` to select a configuration directory. If it is not
@@ -55,6 +119,8 @@ users.json
 token_template.json
 keys/signing-key.pem
 ```
+
+Administrator commands additionally require `admins.json`.
 
 `keys/signing-key.pem` is the default key location; `signing_key_paths` can select
 another location as described under [token signing](#token-signing).

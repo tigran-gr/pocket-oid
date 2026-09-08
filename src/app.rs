@@ -13,6 +13,7 @@ use serde::Serialize;
 use tower_http::trace::TraceLayer;
 
 use crate::{
+    admin_console::AdminConsole,
     auth::AuthStore,
     config::{Client, LoadedConfig, ProviderSettings, SigningAlgorithm, TrustedProviderConfig},
     crypto::{JwkSet, KeyMaterial, load_signing_key},
@@ -27,6 +28,7 @@ use crate::{
 pub struct AppState(Arc<ApplicationState>);
 
 pub struct ApplicationState {
+    pub admin_console: AdminConsole,
     pub provider: ProviderSettings,
     pub clients: HashMap<String, Client>,
     pub users: UserStore,
@@ -64,7 +66,9 @@ impl AppState {
         let upstream_client = UpstreamClient::new()?;
         let scopes_supported = collect_scopes(&config.clients);
         let discovery = DiscoveryDocument::new(&config.provider, &scopes_supported, &signing_keys);
+        let admin_console = AdminConsole::load(config_dir, &config.registered_clients)?;
         Ok(Self(Arc::new(ApplicationState {
+            admin_console,
             provider: config.provider,
             clients: config.clients,
             users: config.users,
@@ -100,6 +104,7 @@ impl AppState {
             .route("/reauth/consent", post(handlers::reauth_consent))
             .route("/healthz", get(handlers::healthz))
             .route("/readyz", get(handlers::readyz))
+            .merge(crate::admin_console::router())
             .with_state(self.clone())
             .layer(TraceLayer::new_for_http())
     }
