@@ -15,12 +15,13 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 use serde::Deserialize;
 use uuid::Uuid;
 
-const SQLITE_SCHEMA_VERSION: i64 = 1;
+const SQLITE_SCHEMA_VERSION: i64 = 2;
 const SQLITE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS admins (
     id            TEXT PRIMARY KEY NOT NULL CHECK (length(id) > 0),
     username      TEXT NOT NULL UNIQUE CHECK (length(username) > 0),
     password_hash TEXT NOT NULL CHECK (length(password_hash) > 0),
+    credential_version INTEGER NOT NULL DEFAULT 1 CHECK (credential_version > 0),
     enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -39,6 +40,16 @@ pub struct AdminRecord {
     pub username: String,
     pub enabled: bool,
     pub created_at: String,
+    pub credential_version: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasswordChangeResult {
+    Changed,
+    IncorrectCurrentPassword,
+    PasswordUnchanged,
+    AccountUnavailable,
+    CredentialsChanged,
 }
 
 #[derive(Debug)]
@@ -118,9 +129,9 @@ impl AdminStore {
                 .lock()
                 .map_err(|_| anyhow!("administrator database lock is poisoned"))?;
             connection.query_row(
-                "SELECT id, username, enabled, created_at, password_hash FROM admins WHERE username = ?1",
+                "SELECT id, username, enabled, created_at, credential_version, password_hash FROM admins WHERE username = ?1",
                 [username],
-                |row| Ok((admin_from_row(row)?, row.get::<_, String>(4)?)),
+                |row| Ok((admin_from_row(row)?, row.get::<_, String>(5)?)),
             ).optional()?
         };
         let hash = row
@@ -145,7 +156,7 @@ impl AdminStore {
             .lock()
             .map_err(|_| anyhow!("administrator database lock is poisoned"))?;
         Ok(connection.query_row(
-            "SELECT id, username, enabled, created_at FROM admins WHERE id = ?1 AND enabled = 1",
+            "SELECT id, username, enabled, created_at, credential_version FROM admins WHERE id = ?1 AND enabled = 1",
             [id], admin_from_row,
         ).optional()?)
     }
@@ -181,7 +192,7 @@ impl AdminStore {
 
         connection
             .query_row(
-                "SELECT id, username, enabled, created_at FROM admins WHERE id = ?1",
+                "SELECT id, username, enabled, created_at, credential_version FROM admins WHERE id = ?1",
                 params![id],
                 admin_from_row,
             )
@@ -200,7 +211,7 @@ impl AdminStore {
             .map_err(|_| anyhow!("administrator database lock is poisoned"))?;
         let mut statement = connection
             .prepare(
-                "SELECT id, username, enabled, created_at FROM admins ORDER BY username COLLATE NOCASE, username",
+                "SELECT id, username, enabled, created_at, credential_version FROM admins ORDER BY username COLLATE NOCASE, username",
             )
             .with_context(|| {
                 format!(
@@ -219,6 +230,72 @@ impl AdminStore {
                 "failed to read administrator database '{}'",
                 self.path.display()
             )
+        })
+    }
+
+    /// Verify and replace one administrator's password.
+    ///
+    /// Argon2 work happens outside the connection lock. The final conditional
+    /// update makes a concurrent credential change win at most once.
+    pub fn change_password(
+        &self,
+        admin_id: &str,
+        current_password: &str,
+        new_password: &str,
+    ) -> anyhow::Result<PasswordChangeResult> {
+        validate_password(new_password)?;
+        let credentials = {
+            let connection = self
+                .connection
+                .lock()
+                .map_err(|_| anyhow!("administrator database lock is poisoned"))?;
+            connection
+                .query_row(
+                    "SELECT password_hash, credential_version FROM admins WHERE id = ?1 AND enabled = 1",
+                    [admin_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()?
+        };
+        let Some((current_hash, credential_version)) = credentials else {
+            return Ok(PasswordChangeResult::AccountUnavailable);
+        };
+        let valid = PasswordHash::new(&current_hash).is_ok_and(|parsed| {
+            parsed.algorithm.as_str() == "argon2id"
+                && Argon2::default()
+                    .verify_password(current_password.as_bytes(), &parsed)
+                    .is_ok()
+        });
+        if !valid {
+            return Ok(PasswordChangeResult::IncorrectCurrentPassword);
+        }
+        if current_password == new_password {
+            return Ok(PasswordChangeResult::PasswordUnchanged);
+        }
+
+        let new_hash = hash_password(new_password)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("administrator database lock is poisoned"))?;
+        let changed = connection
+            .execute(
+                "UPDATE admins
+                 SET password_hash = ?1, credential_version = credential_version + 1,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?2 AND enabled = 1 AND credential_version = ?3 AND password_hash = ?4",
+                params![new_hash, admin_id, credential_version, current_hash],
+            )
+            .with_context(|| {
+                format!(
+                    "failed to change administrator password in '{}'",
+                    self.path.display()
+                )
+            })?;
+        Ok(if changed == 1 {
+            PasswordChangeResult::Changed
+        } else {
+            PasswordChangeResult::CredentialsChanged
         })
     }
 }
@@ -243,6 +320,23 @@ fn initialize_schema(connection: &mut Connection, path: &Path) -> anyhow::Result
                 .commit()
                 .with_context(|| format!("failed to initialize '{}'", path.display()))?;
         }
+        1 => {
+            let transaction = connection
+                .transaction()
+                .with_context(|| format!("failed to migrate '{}'", path.display()))?;
+            transaction
+                .execute_batch(
+                    "ALTER TABLE admins ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 1 CHECK (credential_version > 0);",
+                )
+                .with_context(|| format!("failed to migrate '{}'", path.display()))?;
+            validate_schema(&transaction, path)?;
+            transaction
+                .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+                .with_context(|| format!("failed to migrate '{}'", path.display()))?;
+            transaction
+                .commit()
+                .with_context(|| format!("failed to migrate '{}'", path.display()))?;
+        }
         SQLITE_SCHEMA_VERSION => validate_schema(connection, path)?,
         other => bail!(
             "administrator database '{}' has unsupported schema version {other}; supported version: {SQLITE_SCHEMA_VERSION}",
@@ -255,7 +349,7 @@ fn initialize_schema(connection: &mut Connection, path: &Path) -> anyhow::Result
 fn validate_schema(connection: &Connection, path: &Path) -> anyhow::Result<()> {
     connection
         .prepare(
-            "SELECT id, username, password_hash, enabled, created_at, updated_at FROM admins LIMIT 0",
+            "SELECT id, username, password_hash, enabled, created_at, updated_at, credential_version FROM admins LIMIT 0",
         )
         .with_context(|| {
             format!(
@@ -272,6 +366,7 @@ fn admin_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AdminRecord> {
         username: row.get(1)?,
         enabled: row.get(2)?,
         created_at: row.get(3)?,
+        credential_version: row.get(4)?,
     })
 }
 
@@ -330,7 +425,9 @@ fn secure_database_file(_path: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdminStore, AdminsConfig, SQLITE_SCHEMA_VERSION};
+    use super::{
+        AdminStore, AdminsConfig, PasswordChangeResult, SQLITE_SCHEMA_VERSION, hash_password,
+    };
     use argon2::{Argon2, PasswordHash, PasswordVerifier};
     use rusqlite::Connection;
     use std::{fs, path::Path};
@@ -425,6 +522,90 @@ mod tests {
         )
         .expect_err("unknown schema version should be rejected");
         assert!(error.to_string().contains("unsupported schema version"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migrates_existing_administrators_and_changes_password_atomically() {
+        let root = temporary_root();
+        let database_path = root.join("admins.sqlite3");
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE admins (
+                    id TEXT PRIMARY KEY NOT NULL CHECK (length(id) > 0),
+                    username TEXT NOT NULL UNIQUE CHECK (length(username) > 0),
+                    password_hash TEXT NOT NULL CHECK (length(password_hash) > 0),
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO admins (id, username, password_hash, updated_at)
+                 VALUES ('admin-1', 'alice', ?1, '2000-01-01 00:00:00')",
+                [hash_password("old password").unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = AdminStore::open(
+            AdminsConfig::Sqlite {
+                path: "admins.sqlite3".into(),
+            },
+            &root,
+        )
+        .unwrap();
+        let migrated = store.enabled_admin("admin-1").unwrap().unwrap();
+        assert_eq!(migrated.credential_version, 1);
+        assert_eq!(
+            store
+                .change_password("admin-1", "wrong password", "new password")
+                .unwrap(),
+            PasswordChangeResult::IncorrectCurrentPassword
+        );
+        assert_eq!(
+            store
+                .change_password("admin-1", "old password", "old password")
+                .unwrap(),
+            PasswordChangeResult::PasswordUnchanged
+        );
+        assert_eq!(
+            store
+                .change_password("admin-1", "old password", "new password")
+                .unwrap(),
+            PasswordChangeResult::Changed
+        );
+        assert!(
+            store
+                .authenticate("alice", "old password")
+                .unwrap()
+                .is_none()
+        );
+        let changed = store
+            .authenticate("alice", "new password")
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed.credential_version, 2);
+
+        let connection = Connection::open(&database_path).unwrap();
+        let (version, updated_at): (i64, String) = connection
+            .query_row(
+                "SELECT credential_version, updated_at FROM admins WHERE id = 'admin-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_ne!(updated_at, "2000-01-01 00:00:00");
+        let schema_version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(schema_version, SQLITE_SCHEMA_VERSION);
 
         fs::remove_dir_all(root).unwrap();
     }

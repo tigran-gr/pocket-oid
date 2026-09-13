@@ -20,6 +20,10 @@ fn setup() -> (SigningTestConfig, Router) {
         .unwrap()
         .create("operator", "test-admin-password")
         .unwrap();
+    AdminStore::load_from_directory(&config.path)
+        .unwrap()
+        .create("auditor", "auditor-admin-password")
+        .unwrap();
     let mut clients: Vec<Value> =
         serde_json::from_slice(&fs::read(config.path.join("clients.json")).unwrap()).unwrap();
     clients.push(json!({"client_id":"disabled-client", "client_secret":"never-render-this-client-secret", "enabled":false,
@@ -100,7 +104,7 @@ fn csrf(body: &str) -> String {
         .into()
 }
 
-async fn sign_in(app: &Router) -> String {
+async fn sign_in_as(app: &Router, username: &str, password: &str) -> String {
     let (status, headers, body) = get(app, "/admin/login", "").await;
     assert_eq!(status, StatusCode::OK);
     let initial = headers["set-cookie"]
@@ -114,7 +118,7 @@ async fn sign_in(app: &Router) -> String {
         "/admin/login",
         initial,
         &format!(
-            "username=operator&password=test-admin-password&csrf={}",
+            "username={username}&password={password}&csrf={}",
             csrf(&body)
         ),
     )
@@ -130,6 +134,19 @@ async fn sign_in(app: &Router) -> String {
     cookie.split(';').next().unwrap().into()
 }
 
+async fn sign_in(app: &Router) -> String {
+    sign_in_as(app, "operator", "test-admin-password").await
+}
+
+fn password_form(csrf: &str, current: &str, new: &str, confirm: &str) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf", csrf)
+        .append_pair("current_password", current)
+        .append_pair("new_password", new)
+        .append_pair("confirm_password", confirm)
+        .finish()
+}
+
 #[tokio::test]
 async fn console_requires_a_separate_administrator_session() {
     let (_config, app) = setup();
@@ -138,6 +155,7 @@ async fn console_requires_a_separate_administrator_session() {
         "/admin/users",
         "/admin/provider",
         "/admin/login-preview",
+        "/admin/account/password",
     ] {
         let (status, headers, body) = get(&app, path, "pocket_oid_session=ordinary-session").await;
         assert_eq!(status, StatusCode::SEE_OTHER);
@@ -175,6 +193,286 @@ async fn console_requires_a_separate_administrator_session() {
         result
             .2
             .contains("Invalid administrator username or password")
+    );
+}
+
+#[tokio::test]
+async fn changes_own_password_and_invalidates_only_that_administrators_sessions() {
+    let (_config, app) = setup();
+    let first = sign_in(&app).await;
+    let second = sign_in(&app).await;
+    let auditor = sign_in_as(&app, "auditor", "auditor-admin-password").await;
+    let (status, _, body) = get(&app, "/admin/account/password", &first).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Change password"));
+    assert!(body.contains("href=\"/admin/account/password\""));
+    assert!(body.contains("autocomplete=\"current-password\""));
+    assert_eq!(body.matches("autocomplete=\"new-password\"").count(), 2);
+    assert!(!body.contains("value=\"test-admin-password\""));
+
+    let (status, headers, body) = post(
+        &app,
+        "/admin/account/password",
+        &first,
+        &password_form(
+            &csrf(&body),
+            "test-admin-password",
+            "new-admin-password",
+            "new-admin-password",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(headers["location"], "/admin/login?password_changed=1");
+    assert!(
+        headers["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    assert!(body.is_empty());
+
+    for invalidated in [&first, &second] {
+        assert_eq!(
+            get(&app, "/admin/clients", invalidated).await.0,
+            StatusCode::SEE_OTHER
+        );
+    }
+    assert_eq!(
+        get(&app, "/admin/clients", &auditor).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        sign_in_attempt(&app, "operator", "test-admin-password").await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        sign_in_attempt(&app, "operator", "new-admin-password").await,
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        sign_in_attempt(&app, "auditor", "auditor-admin-password").await,
+        StatusCode::SEE_OTHER
+    );
+
+    let (_, _, success) = get(&app, "/admin/login?password_changed=1", "").await;
+    assert!(success.contains("Your password was changed"));
+}
+
+async fn sign_in_attempt(app: &Router, username: &str, password: &str) -> StatusCode {
+    let (_, headers, body) = get(app, "/admin/login", "").await;
+    let cookie = headers["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    post(
+        app,
+        "/admin/login",
+        cookie,
+        &url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("username", username)
+            .append_pair("password", password)
+            .append_pair("csrf", &csrf(&body))
+            .finish(),
+    )
+    .await
+    .0
+}
+
+#[tokio::test]
+async fn password_validation_failures_preserve_password_and_session() {
+    let (_config, app) = setup();
+    let cookie = sign_in(&app).await;
+    let (_, _, page) = get(&app, "/admin/account/password", &cookie).await;
+    let token = csrf(&page);
+
+    let (status, _, body) = post(
+        &app,
+        "/admin/account/password",
+        &cookie,
+        &password_form(&token, "", "replacement", "replacement"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body.contains("Enter your current password."));
+    assert_eq!(get(&app, "/admin/clients", &cookie).await.0, StatusCode::OK);
+
+    let (status, _, body) = post(
+        &app,
+        "/admin/account/password",
+        &cookie,
+        &password_form(&token, "wrong-password", "replacement", "replacement"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body.contains("Current password is incorrect."));
+    assert!(!body.contains("wrong-password") && !body.contains("replacement"));
+    assert_eq!(get(&app, "/admin/clients", &cookie).await.0, StatusCode::OK);
+
+    let (status, _, body) = post(
+        &app,
+        "/admin/account/password",
+        &cookie,
+        &password_form(&token, "test-admin-password", "replacement", "different"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body.contains("New passwords do not match."));
+    assert!(!body.contains("replacement") && !body.contains("different"));
+    assert_eq!(get(&app, "/admin/clients", &cookie).await.0, StatusCode::OK);
+
+    let (status, _, body) = post(
+        &app,
+        "/admin/account/password",
+        &cookie,
+        &password_form(
+            &token,
+            "test-admin-password",
+            "test-admin-password",
+            "test-admin-password",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body.contains("New password must be different"));
+    assert_eq!(get(&app, "/admin/clients", &cookie).await.0, StatusCode::OK);
+    assert_eq!(
+        sign_in_attempt(&app, "operator", "test-admin-password").await,
+        StatusCode::SEE_OTHER
+    );
+}
+
+#[tokio::test]
+async fn password_change_requires_authentication_csrf_and_enabled_account() {
+    let (config, app) = setup();
+    let anonymous = post(
+        &app,
+        "/admin/account/password",
+        "",
+        &password_form("anything", "old", "new", "new"),
+    )
+    .await;
+    assert_eq!(anonymous.0, StatusCode::SEE_OTHER);
+    assert_eq!(anonymous.1["location"], "/admin/login");
+
+    let cookie = sign_in(&app).await;
+    let (status, _, body) = post(
+        &app,
+        "/admin/account/password",
+        &cookie,
+        &password_form("wrong", "test-admin-password", "replacement", "replacement"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.contains("This form expired."));
+    assert_eq!(get(&app, "/admin/clients", &cookie).await.0, StatusCode::OK);
+
+    rusqlite::Connection::open(config.path.join("data/admins.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE admins SET enabled = 0 WHERE username = 'operator'",
+            [],
+        )
+        .unwrap();
+    let disabled = post(
+        &app,
+        "/admin/account/password",
+        &cookie,
+        &password_form("wrong", "test-admin-password", "replacement", "replacement"),
+    )
+    .await;
+    assert_eq!(disabled.0, StatusCode::SEE_OTHER);
+    assert_eq!(disabled.1["location"], "/admin/login");
+}
+
+#[tokio::test]
+async fn password_database_failure_has_no_false_success_and_preserves_access() {
+    let (config, app) = setup();
+    let cookie = sign_in(&app).await;
+    let (_, _, page) = get(&app, "/admin/account/password", &cookie).await;
+    rusqlite::Connection::open(config.path.join("data/admins.sqlite3"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_password_change
+             BEFORE UPDATE OF password_hash ON admins
+             BEGIN SELECT RAISE(FAIL, 'simulated write failure'); END;",
+        )
+        .unwrap();
+
+    let (status, headers, body) = post(
+        &app,
+        "/admin/account/password",
+        &cookie,
+        &password_form(
+            &csrf(&page),
+            "test-admin-password",
+            "replacement-password",
+            "replacement-password",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!headers.contains_key("location"));
+    assert!(body.contains("Could not change your password. Try again."));
+    assert!(!body.contains("Your password was changed"));
+    assert_eq!(get(&app, "/admin/clients", &cookie).await.0, StatusCode::OK);
+    assert_eq!(
+        sign_in_attempt(&app, "operator", "test-admin-password").await,
+        StatusCode::SEE_OTHER
+    );
+}
+
+#[tokio::test]
+async fn concurrent_old_password_login_cannot_preserve_access_after_change() {
+    let (_config, app) = setup();
+    let changer = sign_in(&app).await;
+    let (_, _, change_page) = get(&app, "/admin/account/password", &changer).await;
+    let (_, login_headers, login_page) = get(&app, "/admin/login", "").await;
+    let login_cookie = login_headers["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let change_form = password_form(
+        &csrf(&change_page),
+        "test-admin-password",
+        "new-admin-password",
+        "new-admin-password",
+    );
+    let login_form = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("username", "operator")
+        .append_pair("password", "test-admin-password")
+        .append_pair("csrf", &csrf(&login_page))
+        .finish();
+
+    let (change, login) = tokio::join!(
+        post(&app, "/admin/account/password", &changer, &change_form),
+        post(&app, "/admin/login", &login_cookie, &login_form),
+    );
+    assert_eq!(change.0, StatusCode::SEE_OTHER);
+    assert!(matches!(
+        login.0,
+        StatusCode::SEE_OTHER | StatusCode::UNAUTHORIZED
+    ));
+    if login.0 == StatusCode::SEE_OTHER {
+        let stale_cookie = login.1["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        assert_eq!(
+            get(&app, "/admin/clients", stale_cookie).await.0,
+            StatusCode::SEE_OTHER
+        );
+    }
+    assert_eq!(
+        sign_in_attempt(&app, "operator", "new-admin-password").await,
+        StatusCode::SEE_OTHER
     );
 }
 
@@ -332,7 +630,7 @@ async fn embedded_icons_are_valid_standalone_svg_documents() {
     let app = AppState::initialize(&config.path).unwrap().router();
     for name in [
         "clients", "users", "provider", "search", "close", "chevron", "enabled", "disabled",
-        "menu", "logout",
+        "menu", "logout", "password",
     ] {
         let (status, headers, body) = get(&app, &format!("/admin/assets/{name}.svg"), "").await;
         assert_eq!(status, StatusCode::OK);

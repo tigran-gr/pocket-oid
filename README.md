@@ -74,7 +74,7 @@ After configuring `admins.json` and creating an administrator, start Pocket-OID
 normally and open `/admin` on its HTTP listener. Sign in with the dedicated
 administrator account; ordinary OIDC users cannot access the console.
 
-The initial console is read-only:
+The console keeps application and provider configuration read-only:
 
 - **Client applications**: searchable registered clients, including disabled
   entries, with redirect URLs, scopes, authentication/consent policy, and
@@ -84,6 +84,8 @@ The initial console is read-only:
   are not a local user directory; administrators remain managed by the CLI.
 - **Provider settings**: name, issuer, token defaults, and a preview
   of the configured login page.
+- **Account password**: the signed-in administrator can use the account menu to
+  change their own password after confirming the current password.
 
 Pages are server-rendered with Leptos inside the existing Axum application.
 CSS, fonts, icons, and a small JavaScript enhancement script are embedded in the
@@ -92,14 +94,20 @@ Client/provider configuration and JSON users reflect the startup snapshot.
 Change the configuration files and restart to update them.
 
 Administrator sessions are separate from OIDC sessions, expire after one hour,
-and are lost on restart. Login/logout use CSRF protection; cookies are HttpOnly
-and SameSite=Strict, with Secure enabled for an HTTPS issuer. Use HTTPS in
-production, keep the issuer consistent with the external URL, and restrict
-access to the admin routes at your reverse proxy where appropriate. Passwords,
-password hashes, client secrets, and private keys are never shown by the console.
+and are lost on restart. Login, logout, and password changes use CSRF protection;
+cookies are HttpOnly and SameSite=Strict, with Secure enabled for an HTTPS issuer.
+Changing a password increments a persisted credential version and invalidates
+every console session for that administrator, including concurrent logins that
+were verified with the previous password. Other administrators and ordinary OIDC
+user sessions are unaffected. Existing version-1 administrator databases are
+migrated automatically without changing their accounts. Use HTTPS in production,
+keep the issuer consistent with the external URL, and restrict access to the admin
+routes at your reverse proxy where appropriate. Passwords, password hashes, client
+secrets, and private keys are never shown by the console.
 
 Without `admins.json`, the OIDC service still runs but administrator sign-in is
-unavailable. The console does not add browser-based account creation or editing.
+unavailable. The console does not add browser-based account creation or changes
+to other administrator accounts.
 
 ## Configure it
 

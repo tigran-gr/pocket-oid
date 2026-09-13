@@ -1,7 +1,7 @@
 mod views;
 
 use crate::{
-    admins::{AdminRecord, AdminStore},
+    admins::{AdminRecord, AdminStore, PasswordChangeResult},
     app::AppState,
     config::{ClientAuthMode, ClientConfig, ConsentMode, ReAuthConsent},
     error::AppError,
@@ -90,6 +90,7 @@ impl From<&ClientConfig> for ClientSummary {
 struct Session {
     csrf: String,
     admin_id: Option<String>,
+    credential_version: Option<i64>,
     expires: Instant,
 }
 
@@ -126,7 +127,7 @@ impl AdminConsole {
         sessions.get(token).cloned()
     }
 
-    fn new_session(&self, admin_id: Option<String>) -> anyhow::Result<(String, String)> {
+    fn new_session(&self, admin: Option<&AdminRecord>) -> anyhow::Result<(String, String)> {
         let token = random_token()?;
         let csrf = random_token()?;
         let mut sessions = self
@@ -138,7 +139,7 @@ impl AdminConsole {
             sessions.len() < 4096,
             "administrator session capacity reached"
         );
-        let ttl = if admin_id.is_some() {
+        let ttl = if admin.is_some() {
             SESSION_TTL
         } else {
             Duration::from_secs(600)
@@ -147,7 +148,8 @@ impl AdminConsole {
             token.clone(),
             Session {
                 csrf: csrf.clone(),
-                admin_id,
+                admin_id: admin.map(|admin| admin.id.clone()),
+                credential_version: admin.map(|admin| admin.credential_version),
                 expires: Instant::now() + ttl,
             },
         );
@@ -161,6 +163,10 @@ pub fn router() -> Router<AppState> {
         .route("/admin/", get(|| async { Redirect::to("/admin/clients") }))
         .route("/admin/login", get(login_page).post(login))
         .route("/admin/logout", post(logout))
+        .route(
+            "/admin/account/password",
+            get(password_page).post(change_password),
+        )
         .route("/admin/clients", get(clients))
         .route("/admin/users", get(users))
         .route("/admin/provider", get(provider))
@@ -258,18 +264,30 @@ async fn authorized(
         .clone()
         .ok_or(AccessError::Unavailable)?;
     match tokio::task::spawn_blocking(move || store.enabled_admin(&id)).await {
-        Ok(Ok(Some(admin))) => Ok((admin, session)),
+        Ok(Ok(Some(admin))) if session.credential_version == Some(admin.credential_version) => {
+            Ok((admin, session))
+        }
+        Ok(Ok(Some(_))) => Err(AccessError::SignIn),
         Ok(Ok(None)) => Err(AccessError::SignIn),
         _ => Err(AccessError::Unavailable),
     }
 }
 
-async fn login_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+#[derive(Default, Deserialize)]
+struct LoginQuery {
+    password_changed: Option<String>,
+}
+
+async fn login_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<LoginQuery>,
+) -> Response {
     if authorized(&state, &headers).await.is_ok() {
         return Redirect::to("/admin/clients").into_response();
     }
     if state.admin_console.store.is_none() {
-        return (StatusCode::SERVICE_UNAVAILABLE, Html(views::login(String::new(), Some("Administrator access is not configured. Configure admins.json and create an administrator with the CLI.".into())))).into_response();
+        return (StatusCode::SERVICE_UNAVAILABLE, Html(views::login(String::new(), Some("Administrator access is not configured. Configure admins.json and create an administrator with the CLI.".into()), false))).into_response();
     }
     // Reuse the browser's pre-auth session so multiple tabs do not invalidate each other.
     if let Some(session) = state
@@ -277,11 +295,16 @@ async fn login_page(State(state): State<AppState>, headers: HeaderMap) -> Respon
         .session(&headers)
         .filter(|s| s.admin_id.is_none())
     {
-        return Html(views::login(session.csrf, None)).into_response();
+        return Html(views::login(
+            session.csrf,
+            None,
+            query.password_changed.is_some(),
+        ))
+        .into_response();
     }
     match state.admin_console.new_session(None) {
         Ok((token, csrf)) => with_cookie(
-            Html(views::login(csrf, None)).into_response(),
+            Html(views::login(csrf, None, query.password_changed.is_some())).into_response(),
             &token,
             &state,
             false,
@@ -313,6 +336,7 @@ async fn login(
             Html(views::login(
                 String::new(),
                 Some("This sign-in form expired. Reload the page and try again.".into()),
+                false,
             )),
         )
             .into_response();
@@ -335,6 +359,7 @@ async fn login(
             Html(views::login(
                 session.csrf,
                 Some("Please wait a moment before trying again.".into()),
+                false,
             )),
         )
             .into_response();
@@ -345,6 +370,7 @@ async fn login(
             Html(views::login(
                 session.csrf,
                 Some("Too many sign-in attempts. Try again in a minute.".into()),
+                false,
             )),
         )
             .into_response();
@@ -359,7 +385,7 @@ async fn login(
     .await;
     match result {
         Ok(Ok(Some(admin))) => {
-            let Ok((token, _)) = state.admin_console.new_session(Some(admin.id)) else {
+            let Ok((token, _)) = state.admin_console.new_session(Some(&admin)) else {
                 return error_response();
             };
             if let Some(old) = cookie(&headers)
@@ -379,10 +405,161 @@ async fn login(
             Html(views::login(
                 session.csrf,
                 Some("Invalid administrator username or password.".into()),
+                false,
             )),
         )
             .into_response(),
         _ => error_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PasswordForm {
+    current_password: String,
+    new_password: String,
+    confirm_password: String,
+    csrf: String,
+}
+
+async fn password_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let (admin, session) = match authorized(&state, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    Html(views::password(admin.username, session.csrf, None)).into_response()
+}
+
+fn password_form_response(
+    status: StatusCode,
+    admin: &AdminRecord,
+    session: &Session,
+    message: &str,
+) -> Response {
+    (
+        status,
+        Html(views::password(
+            admin.username.clone(),
+            session.csrf.clone(),
+            Some(message.into()),
+        )),
+    )
+        .into_response()
+}
+
+async fn change_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<PasswordForm>,
+) -> Response {
+    let current_password = Zeroizing::new(form.current_password);
+    let new_password = Zeroizing::new(form.new_password);
+    let confirm_password = Zeroizing::new(form.confirm_password);
+    let (admin, session) = match authorized(&state, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    if !csrf_matches(&session.csrf, &form.csrf) {
+        return password_form_response(
+            StatusCode::FORBIDDEN,
+            &admin,
+            &session,
+            "This form expired. Reload the page and try again.",
+        );
+    }
+    let validation_error = if current_password.is_empty() {
+        Some("Enter your current password.")
+    } else if new_password.is_empty() {
+        Some("Enter a new password.")
+    } else if confirm_password.is_empty() {
+        Some("Confirm your new password.")
+    } else if new_password.as_str() != confirm_password.as_str() {
+        Some("New passwords do not match.")
+    } else {
+        None
+    };
+    if let Some(message) = validation_error {
+        return password_form_response(StatusCode::UNPROCESSABLE_ENTITY, &admin, &session, message);
+    }
+
+    let allowed = {
+        let Ok(mut attempts) = state.admin_console.attempts.lock() else {
+            return error_response();
+        };
+        attempts.retain(|at| at.elapsed() < Duration::from_secs(60));
+        if attempts.len() >= 30 {
+            false
+        } else {
+            attempts.push_back(Instant::now());
+            true
+        }
+    };
+    if !allowed {
+        return password_form_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            &admin,
+            &session,
+            "Too many password attempts. Try again in a minute.",
+        );
+    }
+    let Ok(permit) = state.admin_console.verification.clone().try_acquire_owned() else {
+        return password_form_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            &admin,
+            &session,
+            "Please wait a moment before trying again.",
+        );
+    };
+    let Some(store) = state.admin_console.store.clone() else {
+        return error_response();
+    };
+    let admin_id = admin.id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        store.change_password(&admin_id, &current_password, &new_password)
+    })
+    .await;
+    match result {
+        Ok(Ok(PasswordChangeResult::Changed)) => {
+            if let Ok(mut sessions) = state.admin_console.sessions.lock() {
+                sessions.retain(|_, candidate| candidate.admin_id.as_deref() != Some(&admin.id));
+            }
+            with_cookie(
+                Redirect::to("/admin/login?password_changed=1").into_response(),
+                "",
+                &state,
+                true,
+            )
+        }
+        Ok(Ok(PasswordChangeResult::IncorrectCurrentPassword)) => password_form_response(
+            StatusCode::UNAUTHORIZED,
+            &admin,
+            &session,
+            "Current password is incorrect.",
+        ),
+        Ok(Ok(PasswordChangeResult::PasswordUnchanged)) => password_form_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &admin,
+            &session,
+            "New password must be different from your current password.",
+        ),
+        Ok(Ok(PasswordChangeResult::CredentialsChanged)) => password_form_response(
+            StatusCode::CONFLICT,
+            &admin,
+            &session,
+            "Your credentials changed in another request. Sign in again and retry.",
+        ),
+        Ok(Ok(PasswordChangeResult::AccountUnavailable)) => with_cookie(
+            Redirect::to("/admin/login").into_response(),
+            "",
+            &state,
+            true,
+        ),
+        _ => password_form_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &admin,
+            &session,
+            "Could not change your password. Try again.",
+        ),
     }
 }
 
@@ -588,6 +765,10 @@ async fn asset(UrlPath(name): UrlPath<String>) -> Response {
         "logout.svg" => (
             "image/svg+xml",
             include_bytes!("../../assets/admin/logout.svg"),
+        ),
+        "password.svg" => (
+            "image/svg+xml",
+            include_bytes!("../../assets/admin/password.svg"),
         ),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };

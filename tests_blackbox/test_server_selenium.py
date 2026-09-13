@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import sqlite3
 import threading
 import time
 import unittest
@@ -11,6 +12,7 @@ from tests_blackbox.blackbox_support import (
     FIXTURES,
     ServerProcess,
     authorize_path,
+    configure_provider_settings,
     decode_jwt_unverified,
     enable_openid_scope,
     http_get_json,
@@ -147,6 +149,118 @@ class SeleniumBlackBoxTests(unittest.TestCase):
                     driver.quit()
             finally:
                 callback.stop()
+                server.stop()
+
+    def test_administrator_changes_password_in_web_console(self):
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        username = "selenium-password-admin"
+        old_password = "password123"
+        new_password = "selenium-new-admin-password"
+        server = ServerProcess("config-basic")
+
+        def configure_admin(config_dir):
+            (config_dir / "admins.json").write_text(
+                json.dumps({"provider": "sqlite", "path": "data/admins.sqlite3"})
+            )
+            password_hash = json.loads((config_dir / "users.json").read_text())["users"][0][
+                "password_hash"
+            ]
+            (config_dir / "data").mkdir(parents=True, exist_ok=True)
+            database = sqlite3.connect(config_dir / "data" / "admins.sqlite3")
+            try:
+                database.executescript(
+                    """
+                    CREATE TABLE admins (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        username TEXT NOT NULL UNIQUE,
+                        password_hash TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    PRAGMA user_version = 1;
+                    """
+                )
+                database.execute(
+                    "INSERT INTO admins (id, username, password_hash) VALUES (?, ?, ?)",
+                    ("selenium-password-admin-id", username, password_hash),
+                )
+                database.commit()
+            finally:
+                database.close()
+            configure_provider_settings(
+                config_dir, "Pocket-OID Selenium", server.base_url
+            )
+
+        server.configure_config = configure_admin
+        driver = None
+        try:
+            server.start()
+            driver = _create_selenium_driver(self.webdriver)
+            driver.set_page_load_timeout(self.timeout)
+            wait = WebDriverWait(driver, self.timeout)
+
+            driver.get(f"{server.base_url}/admin/login")
+            wait.until(EC.visibility_of_element_located((By.NAME, "username"))).send_keys(
+                username
+            )
+            driver.find_element(By.NAME, "password").send_keys(old_password)
+            driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
+            wait.until(EC.url_contains("/admin/clients"))
+
+            driver.find_element(By.CSS_SELECTOR, "[data-account]").click()
+            wait.until(
+                EC.element_to_be_clickable(
+                    (By.CSS_SELECTOR, 'a[href="/admin/account/password"]')
+                )
+            ).click()
+            wait.until(EC.visibility_of_element_located((By.ID, "current-password")))
+
+            driver.find_element(By.ID, "current-password").send_keys(old_password)
+            driver.find_element(By.ID, "new-password").send_keys(new_password)
+            driver.find_element(By.ID, "confirm-password").send_keys("does-not-match")
+            driver.find_element(
+                By.CSS_SELECTOR, 'form[action="/admin/account/password"] button[type="submit"]'
+            ).click()
+            wait.until(
+                EC.text_to_be_present_in_element(
+                    (By.ID, "password-error"), "New passwords do not match."
+                )
+            )
+            for field_id in ("current-password", "new-password", "confirm-password"):
+                self.assertEqual(driver.find_element(By.ID, field_id).get_attribute("value"), "")
+
+            driver.find_element(By.ID, "current-password").send_keys(old_password)
+            driver.find_element(By.ID, "new-password").send_keys(new_password)
+            driver.find_element(By.ID, "confirm-password").send_keys(new_password)
+            driver.find_element(
+                By.CSS_SELECTOR, 'form[action="/admin/account/password"] button[type="submit"]'
+            ).click()
+            wait.until(EC.url_contains("/admin/login?password_changed=1"))
+            self.assertIn("Your password was changed", driver.find_element(By.TAG_NAME, "body").text)
+
+            driver.find_element(By.NAME, "username").send_keys(username)
+            driver.find_element(By.NAME, "password").send_keys(old_password)
+            driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
+            wait.until(
+                EC.text_to_be_present_in_element(
+                    (By.TAG_NAME, "body"), "Invalid administrator username or password."
+                )
+            )
+            driver.find_element(By.NAME, "username").clear()
+            driver.find_element(By.NAME, "username").send_keys(username)
+            driver.find_element(By.NAME, "password").send_keys(new_password)
+            driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
+            wait.until(EC.url_contains("/admin/clients"))
+            self.assertIn(username, driver.find_element(By.CSS_SELECTOR, "[data-account]").text)
+        finally:
+            try:
+                if driver is not None:
+                    driver.quit()
+            finally:
                 server.stop()
 
     def test_five_users_log_in_concurrently_in_selenium(self):

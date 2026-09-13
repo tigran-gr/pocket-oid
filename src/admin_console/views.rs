@@ -68,6 +68,7 @@ fn Shell(
                     <button type="button" class="account-button" aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu" data-account>{username.clone()}<Icon name="chevron"/></button>
                     <div id="account-menu" class="account-menu" role="menu" hidden>
                         <p role="presentation">"Signed in as "<strong>{username}</strong></p>
+                        <a role="menuitem" href="/admin/account/password"><Icon name="password"/>"Change password"</a>
                         <form method="post" action="/admin/logout">
                             <input type="hidden" name="csrf" value=csrf/>
                             <button role="menuitem" type="submit"><Icon name="logout"/>"Sign out"</button>
@@ -76,7 +77,7 @@ fn Shell(
                 </div>
             </div>
             <main id="main" tabindex="-1" class=if detail { "detail-main" } else { "" }>{children()}</main>
-            <footer>"Read-only console"<span>"·"</span>"Configuration loaded at startup"</footer>
+            <footer>"Configuration is read-only"<span>"·"</span>"Loaded at startup"</footer>
         </div>
         <span class="sr-only" id="copy-announcement" role="status" aria-live="polite"></span>
     }
@@ -316,13 +317,14 @@ pub fn provider(username: String, csrf: String, provider: &ProviderSettings) -> 
     )
 }
 
-pub fn login(csrf: String, error: Option<String>) -> String {
+pub fn login(csrf: String, error: Option<String>, password_changed: bool) -> String {
     let unavailable = csrf.is_empty();
     document(
         "Administrator sign in",
         view! {
             <main class="admin-sign-in"><a href="/admin"><img src="/admin/assets/logo.svg" alt="Pocket-OID"/></a>
                 <h1>"Admin console"</h1><p>"Sign in with your administrator account."</p>
+                {password_changed.then(|| view! { <p class="login-success" role="status">"Your password was changed. Sign in with your new password."</p> })}
                 {error.map(|message| view! { <p class="login-error" role="alert">{message}</p> })}
                 <form method="post" action="/admin/login" hidden=unavailable>
                     <input type="hidden" name="csrf" value=csrf/>
@@ -332,6 +334,39 @@ pub fn login(csrf: String, error: Option<String>) -> String {
                 </form>
                 {unavailable.then(|| view! { <a href="/admin/login">"Reload sign in"</a> })}
             </main>
+        },
+    )
+}
+
+pub fn password(username: String, csrf: String, error: Option<String>) -> String {
+    let error_id = error.as_ref().map(|_| "password-error");
+    document(
+        "Change password",
+        view! {
+            <Shell section="" username csrf=csrf.clone() detail=true>
+                <div class="breadcrumb"><a href="/admin/clients">"Admin console"</a><span>"/"</span><span>"Change password"</span></div>
+                <header class="page-header detail-header"><h1>"Change password"</h1><p>"Update the password for your signed-in administrator account. You will be signed out on every device."</p></header>
+                <section class="password-panel" aria-labelledby="password-heading">
+                    <h2 id="password-heading">"Administrator password"</h2>
+                    {error.map(|message| view! { <p id="password-error" class="form-error" role="alert">{message}</p> })}
+                    <form method="post" action="/admin/account/password">
+                        <input type="hidden" name="csrf" value=csrf/>
+                        <div class="form-field">
+                            <label for="current-password">"Current password"</label>
+                            <input id="current-password" name="current_password" type="password" autocomplete="current-password" required aria-describedby=error_id/>
+                        </div>
+                        <div class="form-field">
+                            <label for="new-password">"New password"</label>
+                            <input id="new-password" name="new_password" type="password" autocomplete="new-password" required aria-describedby=error_id/>
+                        </div>
+                        <div class="form-field">
+                            <label for="confirm-password">"Confirm new password"</label>
+                            <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" required aria-describedby=error_id/>
+                        </div>
+                        <div class="form-actions"><button class="primary" type="submit">"Change password"</button><a href="/admin/clients">"Cancel"</a></div>
+                    </form>
+                </section>
+            </Shell>
         },
     )
 }

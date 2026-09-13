@@ -54,6 +54,17 @@ POCKET_OID_SELENIUM_CODE_FLOW=1 python3 -m unittest -v \
   tests_blackbox.test_server_selenium
 ```
 
+The suite also exercises an administrator changing their own password through
+the WebUI, including mismatched-confirmation feedback, cleared password fields,
+sign-out after success, rejection of the old password, and acceptance of the new
+password. It creates a temporary administrator database and never touches a real
+administrator account. Run only that coverage with:
+
+```sh
+POCKET_OID_SELENIUM_CODE_FLOW=1 python3 -m unittest -v \
+  tests_blackbox.test_server_selenium.SeleniumBlackBoxTests.test_administrator_changes_password_in_web_console
+```
+
 The three-client test starts one Pocket-OID server with these temporary clients:
 
 | Client ID | Signing algorithm | Key fixture |
