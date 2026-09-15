@@ -1,5 +1,5 @@
 use super::{ClientSummary, Selection};
-use crate::{config::ProviderSettings, users::UserSummary};
+use crate::{app::DiscoveryDocument, config::ProviderSettings, users::UserSummary};
 use leptos::prelude::*;
 
 fn document(title: &str, body: impl IntoView) -> String {
@@ -291,18 +291,38 @@ pub fn users(
     )
 }
 
-pub fn provider(username: String, csrf: String, provider: &ProviderSettings) -> String {
+pub fn provider(
+    username: String,
+    csrf: String,
+    provider: &ProviderSettings,
+    discovery: &DiscoveryDocument,
+) -> String {
     let name = provider.name.clone();
     let issuer = provider.issuer.clone();
     let algorithm = provider.signing_algorithm.as_str();
     let lifetime = duration(provider.token_ttl_seconds);
     let background = provider.login_background_color.clone();
+    let discovery_url = discovery.discovery_url();
+    let authorization_endpoint = discovery.authorization_endpoint.clone();
+    let token_endpoint = discovery.token_endpoint.clone();
+    let jwks_uri = discovery.jwks_uri.clone();
     document(
         "Provider settings",
         view! { <Shell section="provider" username csrf>
             <header class="page-header"><h1>"Provider settings"</h1><p>"Current provider configuration."</p></header>
             <div class="details provider">
                 <Group title="Identity"><Field label="Provider name">{name}</Field><Field label="Issuer URL" mono=true copy=Some(issuer.clone())>{issuer}</Field></Group>
+                <section class="group connection-details" aria-labelledby="connection-heading">
+                    <h2 id="connection-heading">"OIDC connection details"</h2>
+                    <p>"Use the issuer or discovery URL when configuring an OIDC client. Some applications request individual endpoint URLs."</p>
+                    <p>"The Discovery URL returns the provider’s OpenID Connect configuration."</p>
+                    <dl>
+                        <Field label="Discovery URL" mono=true copy=Some(discovery_url.clone())>{discovery_url}</Field>
+                        <Field label="Authorization endpoint" mono=true copy=Some(authorization_endpoint.clone())>{authorization_endpoint}</Field>
+                        <Field label="Token endpoint" mono=true copy=Some(token_endpoint.clone())>{token_endpoint}</Field>
+                        <Field label="JWKS URL" mono=true copy=Some(jwks_uri.clone())>{jwks_uri}</Field>
+                    </dl>
+                </section>
                 <Group title="Tokens"><Field label="Default signing algorithm" mono=true>{algorithm}</Field><Field label="Default token lifetime">{lifetime}</Field></Group>
                 <section class="group" aria-label="Login appearance"><h2>"Login appearance"</h2><dl>
                     <Field label="Background color" copy=background.clone()>

@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from tests_blackbox.blackbox_support import (
     CodeFlowCallback,
@@ -17,6 +18,39 @@ from tests_blackbox.blackbox_support import (
     enable_openid_scope,
     http_get_json,
 )
+
+
+def _configure_admin_fixture(config_dir, username):
+    """Create an isolated administrator using the fixture's password123 hash."""
+    (config_dir / "admins.json").write_text(
+        json.dumps({"provider": "sqlite", "path": "data/admins.sqlite3"})
+    )
+    password_hash = json.loads((config_dir / "users.json").read_text())["users"][0][
+        "password_hash"
+    ]
+    (config_dir / "data").mkdir(parents=True, exist_ok=True)
+    database = sqlite3.connect(config_dir / "data" / "admins.sqlite3")
+    try:
+        database.executescript(
+            """
+            CREATE TABLE admins (
+                id TEXT PRIMARY KEY NOT NULL,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            PRAGMA user_version = 1;
+            """
+        )
+        database.execute(
+            "INSERT INTO admins (id, username, password_hash) VALUES (?, ?, ?)",
+            ("selenium-admin-id", username, password_hash),
+        )
+        database.commit()
+    finally:
+        database.close()
 
 
 def _create_selenium_driver(webdriver):
@@ -162,35 +196,7 @@ class SeleniumBlackBoxTests(unittest.TestCase):
         server = ServerProcess("config-basic")
 
         def configure_admin(config_dir):
-            (config_dir / "admins.json").write_text(
-                json.dumps({"provider": "sqlite", "path": "data/admins.sqlite3"})
-            )
-            password_hash = json.loads((config_dir / "users.json").read_text())["users"][0][
-                "password_hash"
-            ]
-            (config_dir / "data").mkdir(parents=True, exist_ok=True)
-            database = sqlite3.connect(config_dir / "data" / "admins.sqlite3")
-            try:
-                database.executescript(
-                    """
-                    CREATE TABLE admins (
-                        id TEXT PRIMARY KEY NOT NULL,
-                        username TEXT NOT NULL UNIQUE,
-                        password_hash TEXT NOT NULL,
-                        enabled INTEGER NOT NULL DEFAULT 1,
-                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                    );
-                    PRAGMA user_version = 1;
-                    """
-                )
-                database.execute(
-                    "INSERT INTO admins (id, username, password_hash) VALUES (?, ?, ?)",
-                    ("selenium-password-admin-id", username, password_hash),
-                )
-                database.commit()
-            finally:
-                database.close()
+            _configure_admin_fixture(config_dir, username)
             configure_provider_settings(
                 config_dir, "Pocket-OID Selenium", server.base_url
             )
@@ -262,6 +268,95 @@ class SeleniumBlackBoxTests(unittest.TestCase):
                     driver.quit()
             finally:
                 server.stop()
+
+    def test_provider_connection_details_copy_in_desktop_and_narrow_viewports(self):
+        if os.environ.get("POCKET_OID_SELENIUM_BROWSER", "chrome").lower() != "chrome":
+            self.skipTest("clipboard permission control in this test requires Chrome")
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import WebDriverWait
+
+        username = "selenium-connection-admin"
+        issuer = "http://public-identity.example.test/organizations/a-long-tenant-path/pocket-oid/"
+
+        def configure_admin(config_dir):
+            _configure_admin_fixture(config_dir, username)
+            configure_provider_settings(config_dir, "Pocket-OID Selenium", issuer)
+
+        server = ServerProcess("config-basic", configure_config=configure_admin)
+        self.addCleanup(server.stop)
+        server.start()
+        _, metadata = http_get_json(f"{server.base_url}/.well-known/openid-configuration")
+        urls = {
+            "Discovery URL": issuer.rstrip("/") + "/.well-known/openid-configuration",
+            "Authorization endpoint": metadata["authorization_endpoint"],
+            "Token endpoint": metadata["token_endpoint"],
+            "JWKS URL": metadata["jwks_uri"],
+        }
+        driver = _create_selenium_driver(self.webdriver)
+        self.addCleanup(driver.quit)
+        driver.set_page_load_timeout(self.timeout)
+        wait = WebDriverWait(driver, self.timeout)
+        driver.execute_cdp_cmd("Browser.grantPermissions", {
+            "origin": server.base_url,
+            "permissions": ["clipboardReadWrite", "clipboardSanitizedWrite"],
+        })
+        driver.get(f"{server.base_url}/admin/provider")
+        wait.until(EC.url_contains("/admin/login"))
+        driver.find_element(By.NAME, "username").send_keys(username)
+        driver.find_element(By.NAME, "password").send_keys("password123")
+        driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
+        wait.until(EC.url_contains("/admin/clients"))
+        driver.find_element(By.CSS_SELECTOR, '.sidebar a[href="/admin/provider"]').click()
+        wait.until(EC.visibility_of_element_located((By.ID, "connection-heading")))
+
+        for width, name in [(1280, "desktop"), (390, "narrow")]:
+            with self.subTest(viewport=name):
+                driver.set_window_size(width, 1200)
+                # Chrome can clamp its outer window to 500px; set the actual viewport too.
+                driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": 1200, "deviceScaleFactor": 1, "mobile": False,
+                })
+                self.assertEqual(driver.execute_script("return window.innerWidth"), width)
+                for label, expected in urls.items():
+                    button = driver.find_element(By.CSS_SELECTOR, f'button[aria-label="Copy {label}"]')
+                    self.assertEqual(button.get_attribute("data-copy"), expected)
+                    value = button.find_element(By.XPATH, "../dd")
+                    self.assertEqual(value.text, expected)
+                    # Keyboard activation exercises the same copy handler as pointer input.
+                    button.send_keys(Keys.ENTER)
+                    wait.until(lambda _: button.text == "Copied")
+                    self.assertEqual(driver.find_element(By.ID, "copy-announcement").text, "Copied")
+                    copied = driver.execute_async_script(
+                        "const done = arguments[0]; navigator.clipboard.readText().then(done, e => done(String(e)));"
+                    )
+                    self.assertEqual(copied, expected)
+                    self.assertTrue(driver.execute_script(
+                        "return arguments[0].scrollWidth <= arguments[0].clientWidth + 1", value
+                    ))
+                    self.assertNotEqual(driver.execute_script(
+                        "return getComputedStyle(arguments[0]).outlineStyle", button
+                    ), "none")
+                self.assertTrue(driver.execute_script(
+                    "return document.documentElement.scrollWidth <= window.innerWidth"
+                ))
+                driver.find_element(By.ID, "connection-heading").location_once_scrolled_into_view
+                screenshot_dir = os.environ.get("POCKET_OID_SELENIUM_SCREENSHOT_DIR")
+                if screenshot_dir:
+                    output = Path(screenshot_dir)
+                    output.mkdir(parents=True, exist_ok=True)
+                    driver.save_screenshot(str(output / f"connection-details-{name}.png"))
+
+        # Force a clipboard error and verify that the existing fallback selects the full URL.
+        driver.execute_script(
+            "Object.defineProperty(navigator.clipboard, 'writeText', {value: () => Promise.reject(new Error('denied'))});"
+        )
+        button = driver.find_element(By.CSS_SELECTOR, 'button[aria-label="Copy Discovery URL"]')
+        button.click()
+        wait.until(lambda _: button.text == "Select text to copy")
+        self.assertEqual(driver.execute_script("return window.getSelection().toString()"), urls["Discovery URL"])
+        self.assertEqual(driver.find_element(By.ID, "copy-announcement").text, "Select text to copy")
 
     def test_five_users_log_in_concurrently_in_selenium(self):
         if os.environ.get("POCKET_OID_SELENIUM_BROWSER", "chrome").lower() == "safari":

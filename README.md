@@ -82,8 +82,10 @@ The console keeps application and provider configuration read-only:
 - **Users**: searchable local users from JSON or SQLite, with a detail panel.
   SQLite status changes are visible without restarting. Upstream identities
   are not a local user directory; administrators remain managed by the CLI.
-- **Provider settings**: name, issuer, token defaults, and a preview
-  of the configured login page.
+- **Provider settings**: name, issuer, token defaults, a preview of the configured
+  login page, and copyable OIDC connection details (discovery, authorization,
+  token, and JWKS URLs). Connection URLs use the configured public issuer and
+  match the provider’s discovery metadata, including any issuer path prefix.
 - **Account password**: the signed-in administrator can use the account menu to
   change their own password after confirming the current password.
 

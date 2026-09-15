@@ -65,6 +65,20 @@ POCKET_OID_SELENIUM_CODE_FLOW=1 python3 -m unittest -v \
   tests_blackbox.test_server_selenium.SeleniumBlackBoxTests.test_administrator_changes_password_in_web_console
 ```
 
+The Provider settings test checks all four connection URLs against live discovery
+metadata, keyboard copying into the real clipboard, accessible feedback, and the
+clipboard-failure text-selection fallback. It checks desktop and 390-pixel-wide
+layouts using a temporary administrator database. Chrome is required for its
+clipboard permission control. Use the repository virtual environment if installed:
+
+```sh
+POCKET_OID_SELENIUM_CODE_FLOW=1 .venv/bin/python -m unittest -v \
+  tests_blackbox.test_server_selenium.SeleniumBlackBoxTests.test_provider_connection_details_copy_in_desktop_and_narrow_viewports
+```
+
+Set `POCKET_OID_SELENIUM_SCREENSHOT_DIR=target/selenium-screenshots` to save its
+desktop and narrow viewport screenshots.
+
 The three-client test starts one Pocket-OID server with these temporary clients:
 
 | Client ID | Signing algorithm | Key fixture |

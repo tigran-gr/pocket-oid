@@ -197,6 +197,64 @@ async fn console_requires_a_separate_administrator_session() {
 }
 
 #[tokio::test]
+async fn provider_connection_details_match_public_discovery_and_copy_complete_urls() {
+    let (config, _) = setup();
+    for issuer in [
+        "https://id.example.com",
+        "https://id.example.com/",
+        "https://id.example.com/tenant/pocket-oid",
+        "https://id.example.com/tenant/pocket-oid/",
+    ] {
+        let path = config.path.join("provider.json");
+        let mut provider: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        provider["issuer"] = json!(issuer);
+        fs::write(path, serde_json::to_vec(&provider).unwrap()).unwrap();
+        let app = AppState::initialize(&config.path).unwrap().router();
+        let (status, headers, anonymous) = get(&app, "/admin/provider", "").await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(headers["location"], "/admin/login");
+        assert!(!anonymous.contains("OIDC connection details"));
+
+        let (status, _, metadata) = get(&app, "/.well-known/openid-configuration", "").await;
+        assert_eq!(status, StatusCode::OK);
+        let metadata: Value = serde_json::from_str(&metadata).unwrap();
+        let cookie = sign_in(&app).await;
+        let (status, _, page) = get(&app, "/admin/provider", &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(page.contains("OIDC connection details"));
+        assert!(page.contains("Use the issuer or discovery URL when configuring an OIDC client."));
+        let base = issuer.trim_end_matches('/');
+        for (label, expected) in [
+            (
+                "Discovery URL",
+                format!("{base}/.well-known/openid-configuration"),
+            ),
+            (
+                "Authorization endpoint",
+                metadata["authorization_endpoint"].as_str().unwrap().into(),
+            ),
+            (
+                "Token endpoint",
+                metadata["token_endpoint"].as_str().unwrap().into(),
+            ),
+            ("JWKS URL", metadata["jwks_uri"].as_str().unwrap().into()),
+        ] {
+            assert!(expected.starts_with(&format!("{base}/")));
+            assert!(page.contains(&format!(
+                "<dt>{label}</dt><dd class=\"mono\">{expected}</dd>"
+            )));
+            assert!(page.contains(&format!(
+                "data-copy=\"{expected}\" aria-label=\"Copy {label}\""
+            )));
+        }
+        assert_eq!(page.matches("<dt>Issuer URL</dt>").count(), 1);
+        assert!(page.contains(&format!(
+            "data-copy=\"{issuer}\" aria-label=\"Copy Issuer URL\""
+        )));
+    }
+}
+
+#[tokio::test]
 async fn changes_own_password_and_invalidates_only_that_administrators_sessions() {
     let (_config, app) = setup();
     let first = sign_in(&app).await;

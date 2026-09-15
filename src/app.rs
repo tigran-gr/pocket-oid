@@ -119,6 +119,14 @@ impl Deref for AppState {
 }
 
 impl DiscoveryDocument {
+    /// Public discovery location, using the same issuer base as the metadata endpoints.
+    pub fn discovery_url(&self) -> String {
+        format!(
+            "{}/.well-known/openid-configuration",
+            self.issuer.trim_end_matches('/')
+        )
+    }
+
     fn new(
         provider: &ProviderSettings,
         scopes_supported: &[String],

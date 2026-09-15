@@ -679,6 +679,7 @@ async fn provider(State(state): State<AppState>, headers: HeaderMap) -> Response
         admin.username,
         session.csrf,
         &state.provider,
+        &state.discovery,
     ))
     .into_response()
 }
