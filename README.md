@@ -76,10 +76,14 @@ administrator account; ordinary OIDC users cannot access the console.
 
 The console keeps application and provider configuration read-only:
 
-- **Client applications**: searchable registered clients, including disabled
-  entries, with redirect URLs, scopes, authentication/consent policy, and
-  effective signing algorithm and token lifetime (including inheritance).
-- **Users**: searchable local users from JSON or SQLite, with a detail panel.
+- **Client applications**: registered clients searchable by client ID or scope,
+  with All/Enabled/Disabled status and All/Local/Upstream authentication filters
+  and Client ID A–Z/Z–A sorting. Details include redirect URLs, scopes,
+  authentication/consent policy, and effective signing algorithm and token lifetime (including inheritance).
+- **Users**: local users from JSON or SQLite searchable by username or user ID,
+  with All/Enabled/Disabled status, Username A–Z/Z–A sorting, and a detail panel.
+  The configured source and matching count stay visible, including when no
+  records match. JSON users are all enabled, so Disabled produces no matches.
   SQLite status changes are visible without restarting. Upstream identities
   are not a local user directory; administrators remain managed by the CLI.
 - **Provider settings**: name, issuer, token defaults, a preview of the configured
@@ -88,6 +92,17 @@ The console keeps application and provider configuration read-only:
   match the provider’s discovery metadata, including any issuer path prefix.
 - **Account password**: the signed-in administrator can use the account menu to
   change their own password after confirming the current password.
+
+List controls affect only displayed records. Search is case-insensitive, filters
+combine with AND, and sorting uses lowercase names with original names and IDs
+as deterministic tie-breakers. Lists default to all records in ascending order.
+The URL stores `q` (search), `status=all|enabled|disabled`, `sort=asc|desc`, and,
+for clients only, `auth=all|local|upstream`. Missing or unsupported values use
+the defaults. Refresh, detail links, and return links preserve these controls.
+Filtering out an inspected user closes the panel and clears its selection.
+**Clear search** keeps filters and sorting; **Reset** restores all list defaults.
+Controls update immediately with JavaScript; the **Apply** GET form also works
+without JavaScript.
 
 Pages are server-rendered with Leptos inside the existing Axum application.
 CSS, fonts, icons, and a small JavaScript enhancement script are embedded in the

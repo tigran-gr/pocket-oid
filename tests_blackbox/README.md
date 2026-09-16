@@ -79,6 +79,19 @@ POCKET_OID_SELENIUM_CODE_FLOW=1 .venv/bin/python -m unittest -v \
 Set `POCKET_OID_SELENIUM_SCREENSHOT_DIR=target/selenium-screenshots` to save its
 desktop and narrow viewport screenshots.
 
+The admin list tests use temporary enabled/disabled SQLite users and clients,
+including Local/Upstream clients and mixed-case names. They verify combined
+search/filter/sort controls, result counts, Clear search, Reset, refresh,
+detail/back navigation, inspector dismissal, and desktop/mobile layout. A second
+Chrome test covers JSON's all-enabled behavior and native GET forms with
+JavaScript disabled:
+
+```sh
+POCKET_OID_SELENIUM_CODE_FLOW=1 .venv/bin/python -m unittest -v \
+  tests_blackbox.test_server_selenium.SeleniumBlackBoxTests.test_admin_list_controls_navigation_and_mobile_layout \
+  tests_blackbox.test_server_selenium.SeleniumBlackBoxTests.test_admin_json_disabled_and_native_get_forms
+```
+
 The three-client test starts one Pocket-OID server with these temporary clients:
 
 | Client ID | Signing algorithm | Key fixture |

@@ -595,11 +595,81 @@ async fn logout(
     )
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
+#[serde(default)]
 pub struct Selection {
-    #[serde(default)]
     pub q: String,
     pub id: Option<String>,
+    pub status: String,
+    pub auth: String,
+    pub sort: String,
+}
+
+impl Selection {
+    fn status(&self) -> &str {
+        match self.status.as_str() {
+            "enabled" => "enabled",
+            "disabled" => "disabled",
+            _ => "all",
+        }
+    }
+
+    fn auth(&self) -> &str {
+        match self.auth.as_str() {
+            "local" => "local",
+            "upstream" => "upstream",
+            _ => "all",
+        }
+    }
+
+    fn sort(&self) -> &str {
+        if self.sort == "desc" { "desc" } else { "asc" }
+    }
+
+    fn matches(&self, text: &str, enabled: bool) -> bool {
+        text.to_lowercase().contains(&self.q.trim().to_lowercase())
+            && match self.status() {
+                "enabled" => enabled,
+                "disabled" => !enabled,
+                _ => true,
+            }
+    }
+
+    fn matches_client(&self, client: &ClientSummary) -> bool {
+        self.matches(
+            &format!("{} {}", client.id, client.scopes.join(" ")),
+            client.enabled,
+        ) && (self.auth() == "all" || self.auth().eq_ignore_ascii_case(client.mode))
+    }
+
+    fn matches_user(&self, user: &crate::users::UserSummary) -> bool {
+        self.matches(&format!("{} {}", user.username, user.id), user.enabled)
+    }
+
+    fn url(&self, section: &str, id: Option<&str>) -> String {
+        let mut params = url::form_urlencoded::Serializer::new(String::new());
+        if let Some(id) = id {
+            params.append_pair("id", id);
+        }
+        if !self.q.is_empty() {
+            params.append_pair("q", &self.q);
+        }
+        if self.status() != "all" {
+            params.append_pair("status", self.status());
+        }
+        if section == "clients" && self.auth() != "all" {
+            params.append_pair("auth", self.auth());
+        }
+        if self.sort() != "asc" {
+            params.append_pair("sort", self.sort());
+        }
+        let params = params.finish();
+        if params.is_empty() {
+            format!("/admin/{section}")
+        } else {
+            format!("/admin/{section}?{params}")
+        }
+    }
 }
 
 async fn clients(
@@ -646,6 +716,16 @@ async fn users(
     let store = state.users.clone();
     let records = tokio::task::spawn_blocking(move || store.list()).await;
     let records = records.ok().and_then(Result::ok);
+    // An inspector must never describe a user excluded by the visible list.
+    // Redirect also clears stale selections for direct GETs without JavaScript.
+    if let Some(selected) = records.as_ref().and_then(|users| {
+        users
+            .iter()
+            .find(|user| Some(&user.id) == selection.id.as_ref())
+    }) && !selection.matches_user(selected)
+    {
+        return Redirect::to(&selection.url("users", None)).into_response();
+    }
     let status = if records.is_none() {
         StatusCode::SERVICE_UNAVAILABLE
     } else if selection

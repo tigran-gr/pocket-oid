@@ -101,39 +101,63 @@ fn Group(title: &'static str, children: Children) -> impl IntoView {
 }
 
 #[component]
-fn Search(section: &'static str, query: String) -> impl IntoView {
+fn ListControls(section: &'static str, selection: Selection) -> impl IntoView {
     let label = if section == "clients" {
         "Search client ID or scope"
     } else {
         "Search username or user ID"
     };
-    view! { <form class="search" role="search" method="get" action=format!("/admin/{section}")>
-        <Icon name="search"/><input type="search" name="q" aria-label=label placeholder=label value=query.clone() autocomplete="off"/>
-        <button type="button" data-clear-search aria-label="Clear search" hidden=query.is_empty()><Icon name="close"/></button>
+    let sort_label = if section == "clients" {
+        "Client ID"
+    } else {
+        "Username"
+    };
+    let mut cleared = selection.clone();
+    cleared.q.clear();
+    let clear_url = cleared.url(section, selection.id.as_deref());
+    let reset_url = Selection::default().url(section, selection.id.as_deref());
+    view! { <form class="list-controls" role="search" method="get" action=format!("/admin/{section}")>
+        {selection.id.clone().map(|id| view! { <input type="hidden" name="id" value=id/> })}
+        <div class="search-control"><label for="list-search">"Search"</label><div class="search">
+            <Icon name="search"/><input id="list-search" type="search" name="q" aria-label=label placeholder=label value=selection.q.clone() autocomplete="off"/>
+            <a class="icon-button" href=clear_url data-clear-search aria-label="Clear search" hidden=selection.q.is_empty()><Icon name="close"/></a>
+        </div></div>
+        <div class="list-control"><label for="list-status">"Status"</label><select id="list-status" name="status">
+            <option value="all" selected=selection.status() == "all">"All"</option>
+            <option value="enabled" selected=selection.status() == "enabled">"Enabled"</option>
+            <option value="disabled" selected=selection.status() == "disabled">"Disabled"</option>
+        </select></div>
+        {(section == "clients").then(|| view! { <div class="list-control"><label for="list-auth">"Authentication"</label><select id="list-auth" name="auth">
+            <option value="all" selected=selection.auth() == "all">"All"</option>
+            <option value="local" selected=selection.auth() == "local">"Local"</option>
+            <option value="upstream" selected=selection.auth() == "upstream">"Upstream"</option>
+        </select></div> })}
+        <div class="list-control"><label for="list-sort">"Sort"</label><select id="list-sort" name="sort">
+            <option value="asc" selected=selection.sort() == "asc">{format!("{sort_label} A–Z")}</option>
+            <option value="desc" selected=selection.sort() == "desc">{format!("{sort_label} Z–A")}</option>
+        </select></div>
+        <button class="primary" type="submit">"Apply"</button>
+        <a class="text-button" href=reset_url data-reset-list>"Reset"</a>
     </form> }
 }
 
-fn selected_url(section: &str, id: Option<&str>, query: &str) -> String {
-    let mut params = url::form_urlencoded::Serializer::new(String::new());
-    if let Some(id) = id {
-        params.append_pair("id", id);
-    }
-    if !query.is_empty() {
-        params.append_pair("q", query);
-    }
-    let params = params.finish();
-    format!(
-        "/admin/{section}{}",
-        if params.is_empty() {
-            String::new()
-        } else {
-            format!("?{params}")
-        }
-    )
+#[component]
+fn NoResults(section: &'static str, selection: Selection, hidden: bool) -> impl IntoView {
+    let mut cleared = selection.clone();
+    cleared.q.clear();
+    view! { <div class="state" data-no-results hidden=hidden>
+        <Icon name="search"/><h2>"No matches found."</h2><p>"Try changing your search or filters."</p>
+        <a class="text-button" href=cleared.url(section, None) data-clear-search hidden=selection.q.is_empty()>"Clear search"</a>
+        <a class="text-button" href=format!("/admin/{section}") data-reset-list>"Reset"</a>
+    </div> }
 }
 
-fn matches(text: &str, query: &str) -> bool {
-    text.to_lowercase().contains(&query.trim().to_lowercase())
+// Locale-independent order: lowercase name, original name, then stable ID.
+// The browser uses these server-assigned ranks, including for Unicode names.
+fn alphabetical(a: &str, b: &str) -> std::cmp::Ordering {
+    a.to_lowercase()
+        .cmp(&b.to_lowercase())
+        .then_with(|| a.cmp(b))
 }
 
 pub fn clients(
@@ -145,23 +169,28 @@ pub fn clients(
 ) -> String {
     if let Some(id) = &selection.id {
         return match clients.iter().find(|c| &c.id == id) {
-            Some(client) => client_details(username, csrf, client.clone(), provider, selection.q),
+            Some(client) => client_details(username, csrf, client.clone(), provider, selection),
             None => document(
                 "Client not found",
-                view! { <Shell section="clients" username csrf detail=true><h1>"Client not found"</h1><a href=selected_url("clients", None, &selection.q)>"Back to client applications"</a></Shell> },
+                view! { <Shell section="clients" username csrf detail=true><h1>"Client not found"</h1><a href=selection.url("clients", None)>"Back to client applications"</a></Shell> },
             ),
         };
     }
-    let query = selection.q;
     let empty = clients.is_empty();
     let count = clients
         .iter()
-        .filter(|c| matches(&format!("{} {}", c.id, c.scopes.join(" ")), &query))
+        .filter(|c| selection.matches_client(c))
         .count();
-    let rows = clients.iter().map(|c| {
-        let search = format!("{} {}", c.id, c.scopes.join(" "));
-        view! { <tr data-search=search.clone() hidden=!matches(&search, &query)>
-            <td data-label="Client ID"><a class="id-link" data-detail-link href=selected_url("clients", Some(&c.id), &query)>{c.id.clone()}</a></td>
+    let mut ordered = clients.iter().collect::<Vec<_>>();
+    ordered.sort_by(|a, b| alphabetical(&a.id, &b.id));
+    let mut ranked = ordered.into_iter().enumerate().collect::<Vec<_>>();
+    if selection.sort() == "desc" {
+        ranked.reverse();
+    }
+    let rows = ranked.into_iter().map(|(rank, c)| {
+        let search = format!("{} {}", c.id, c.scopes.join(" ")).to_lowercase();
+        view! { <tr data-search=search data-rank=rank data-status=if c.enabled { "enabled" } else { "disabled" } data-auth=c.mode.to_ascii_lowercase() hidden=!selection.matches_client(c)>
+            <td data-label="Client ID"><a class="id-link" data-detail-link href=selection.url("clients", Some(&c.id))>{c.id.clone()}</a></td>
             <td data-label="Status"><Status enabled=c.enabled/></td>
             <td data-label="Authentication">{c.mode}</td>
             <td data-label="Scopes" class="scopes">{if c.scopes.is_empty() { "No scopes configured".into() } else { c.scopes.join(", ") }}</td>
@@ -172,13 +201,13 @@ pub fn clients(
         view! {
             <Shell section="clients" username csrf>
                 <header class="page-header"><h1>"Client applications"</h1><p>"Inspect registered applications and their authentication settings."</p></header>
-                <div class="toolbar"><Search section="clients" query=query.clone()/><span class="count" role="status" data-count="applications">{format!("{count} {} · includes disabled clients", if count == 1 { "application" } else { "applications" })}</span></div>
+                <div class="toolbar"><ListControls section="clients" selection=selection.clone()/><span class="count" role="status" aria-live="polite" aria-atomic="true" data-count="applications">{format!("{count} {} found", if count == 1 { "application" } else { "applications" })}</span></div>
                 <div class="list-detail"><div class="table-area">
                     <table data-filter-table hidden=count == 0><caption class="sr-only">"Registered client applications, including disabled clients"</caption>
                         <thead><tr><th scope="col">"Client ID"</th><th scope="col">"Status"</th><th scope="col">"Authentication"</th><th scope="col">"Scopes"</th></tr></thead><tbody>{rows}</tbody>
                     </table>
                     <div class="state" role="status" hidden=!empty><h2>"No client applications configured."</h2><p>"Configured applications will appear here."</p></div>
-                    <div class="state" data-no-results hidden={count > 0 || empty} role="status"><Icon name="search"/><h2 data-no-results-title>{format!("No matches for “{query}”.")}</h2><button class="text-button" type="button" data-clear-search>"Clear search"</button></div>
+                    <NoResults section="clients" selection=selection.clone() hidden={count > 0 || empty}/>
                 </div></div>
             </Shell>
         },
@@ -190,7 +219,7 @@ fn client_details(
     csrf: String,
     client: ClientSummary,
     provider: &ProviderSettings,
-    query: String,
+    selection: Selection,
 ) -> String {
     let title = client.id.clone();
     let algorithm = client
@@ -203,7 +232,7 @@ fn client_details(
     }).collect_view();
     let scopes = client.scopes.join(", ");
     let scope_copy = (!client.scopes.is_empty()).then(|| client.scopes.join(" "));
-    let back = selected_url("clients", None, &query);
+    let back = selection.url("clients", None);
     document(
         &title,
         view! {
@@ -241,28 +270,29 @@ pub fn users(
     source: &'static str,
     selection: Selection,
 ) -> String {
-    let query = selection.q;
     let error = users.is_none();
-    let records = users.unwrap_or_default();
+    let mut records = users.unwrap_or_default();
+    records.sort_by(|a, b| alphabetical(&a.username, &b.username).then_with(|| a.id.cmp(&b.id)));
     let selected = selection
         .id
         .as_ref()
         .and_then(|id| records.iter().find(|u| &u.id == id))
         .cloned();
-    let count = records
-        .iter()
-        .filter(|u| matches(&format!("{} {}", u.username, u.id), &query))
-        .count();
-    let rows = records.iter().map(|u| {
-        let search = format!("{} {}", u.username, u.id);
-        view! { <tr data-search=search.clone() hidden=!matches(&search, &query) class=if Some(&u.id) == selection.id.as_ref() { "selected" } else { "" }>
-            <td data-label="Username"><a class="id-link" data-detail-link href=selected_url("users", Some(&u.id), &query)>{u.username.clone()}</a></td>
+    let count = records.iter().filter(|u| selection.matches_user(u)).count();
+    let mut ranked = records.iter().enumerate().collect::<Vec<_>>();
+    if selection.sort() == "desc" {
+        ranked.reverse();
+    }
+    let rows = ranked.into_iter().map(|(rank, u)| {
+        let search = format!("{} {}", u.username, u.id).to_lowercase();
+        view! { <tr data-search=search data-rank=rank data-status=if u.enabled { "enabled" } else { "disabled" } hidden=!selection.matches_user(u) class=if Some(&u.id) == selection.id.as_ref() { "selected" } else { "" }>
+            <td data-label="Username"><a class="id-link" data-detail-link href=selection.url("users", Some(&u.id))>{u.username.clone()}</a></td>
             <td data-label="User ID" class="mono">{u.id.clone()}</td><td data-label="Status"><Status enabled=u.enabled/></td>
         </tr> }
     }).collect_view();
     let detail = selection.id.as_ref().filter(|_| !error).map(|_| view! {
         <aside class="user-detail" aria-label="User details"><div class="user-detail-header"><h2>{selected.as_ref().map(|u| u.username.clone()).unwrap_or_else(|| "User not found".into())}</h2>
-            <a class="icon-button" href=selected_url("users", None, &query) data-close-user aria-label="Close user details"><Icon name="close"/></a>
+            <a class="icon-button" href=selection.url("users", None) data-close-user aria-label="Close user details"><Icon name="close"/></a>
         </div>
         {selected.clone().map(|u| view! { <dl>
             <Field label="Username">{u.username.clone()}</Field><Field label="User ID" mono=true copy=Some(u.id.clone())>{u.id.clone()}</Field>
@@ -277,15 +307,14 @@ pub fn users(
             <header class="page-header"><h1>"Users"</h1><p>"Local application users. Administrator accounts and upstream identities are separate."</p>
                 <p class="source">"User source: "<strong>{source}</strong>{(source == "JSON").then(|| view! { <span>"All configured JSON users are enabled."</span> })}</p>
             </header>
-            <div class="toolbar"><Search section="users" query=query.clone()/></div>
-            <span class="sr-only" role="status" data-count="users" hidden=error>{format!("{count} users found")}</span>
+            <div class="toolbar"><ListControls section="users" selection=selection.clone()/><span class="count" role="status" aria-live="polite" aria-atomic="true" data-count="users" hidden=error>{format!("{count} {} found", if count == 1 { "user" } else { "users" })}</span></div>
             <div class=if selection.id.is_some() && !error { "list-detail has-detail" } else { "list-detail" }><div class="table-area">
                 <table data-filter-table hidden=error || count == 0><caption class="sr-only">"Local application users"</caption>
                     <thead><tr><th scope="col">"Username"</th><th scope="col">"User ID"</th><th scope="col">"Status"</th></tr></thead><tbody>{rows}</tbody>
                 </table>
-                <div class="state error" role="alert" hidden=!error><h2>"Could not load users."</h2><p>"Try again."</p><a class="primary" href=selected_url("users", selection.id.as_deref(), &query)>"Retry"</a></div>
+                <div class="state error" role="alert" hidden=!error><h2>"Could not load users."</h2><p>"Try again."</p><a class="primary" href=selection.url("users", selection.id.as_deref())>"Retry"</a></div>
                 <div class="state" role="status" hidden=error || !records.is_empty()><h2>"No local users available."</h2><p>"Configured local users will appear here."</p></div>
-            <div class="state" data-no-results hidden={error || count > 0 || records.is_empty()} role="status"><Icon name="search"/><h2 data-no-results-title>{format!("No users match “{query}”.")}</h2><button class="text-button" type="button" data-clear-search>"Clear search"</button></div>
+            <NoResults section="users" selection=selection.clone() hidden={error || count > 0 || records.is_empty()}/>
             </div>{detail}</div>
         </Shell> },
     )
@@ -419,6 +448,33 @@ fn duration(seconds: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_client_source_is_distinct_from_no_matches() {
+        let provider = serde_json::from_str(include_str!(
+            "../../tests/fixtures/config-basic/provider.json"
+        ))
+        .unwrap();
+        let body = super::clients(
+            "operator".into(),
+            String::new(),
+            &[],
+            &provider,
+            super::Selection {
+                q: "portal".into(),
+                status: "disabled".into(),
+                ..Default::default()
+            },
+        );
+        assert!(body.contains("0 applications found"));
+        let empty = body
+            .split("<div ")
+            .find(|part| part.contains("<h2>No client applications configured."))
+            .unwrap();
+        assert!(!empty.split('>').next().unwrap().contains("hidden"));
+        let no_matches = body.split("data-no-results").nth(1).unwrap();
+        assert!(no_matches.split('>').next().unwrap().contains("hidden"));
+    }
+
     #[test]
     fn duration_uses_actual_values() {
         assert_eq!(super::duration(3600), "3,600 seconds (1 hour)");

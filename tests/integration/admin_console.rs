@@ -705,3 +705,332 @@ async fn embedded_icons_are_valid_standalone_svg_documents() {
         StatusCode::NOT_FOUND
     );
 }
+
+fn list_fixture(sqlite: bool) -> (SigningTestConfig, Router) {
+    let (config, _) = setup();
+    let clients = [
+        ("zebra", true, false, "portal"),
+        ("alpha", false, false, "reports"),
+        ("ALPHA", true, true, "portal"),
+        ("Beta", false, true, "portal"),
+        ("beta", true, true, "portal"),
+        ("Zulu", true, true, "service"),
+    ]
+    .map(|(id, enabled, upstream, scope)| {
+        let mut client = json!({"client_id": id, "client_secret": "fixture-secret", "enabled": enabled, "scopes": [scope]});
+        if upstream {
+            client["auth_mode"] = json!("re_auth");
+            client["re_auth"] = json!({"provider_id": "partner", "upstream_scopes": ["openid"]});
+        }
+        client
+    });
+    fs::write(
+        config.path.join("clients.json"),
+        serde_json::to_vec(&clients).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        config.path.join("trusted_providers.json"),
+        serde_json::to_vec(&json!([{
+            "provider_id": "partner", "type": "oidc", "issuer": "https://upstream.example",
+            "client_id": "pocket", "client_secret": "upstream-secret",
+            "redirect_uri": "https://pocket-oid.local/reauth/callback/partner"
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    let original: Value =
+        serde_json::from_slice(&fs::read(config.path.join("users.json")).unwrap()).unwrap();
+    let hash = original["users"][0]["password_hash"].as_str().unwrap();
+    let users = [
+        ("user-1", "ALICE", true),
+        ("user-2", "alice", false),
+        ("user-3", "Bob", true),
+        ("user-4", "zebra", false),
+    ];
+    if sqlite {
+        let db = rusqlite::Connection::open(config.path.join("data/users.sqlite3")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE users (
+            id TEXT PRIMARY KEY NOT NULL, username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        for (id, name, enabled) in users {
+            db.execute(
+                "INSERT INTO users (id, username, password_hash, enabled) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, name, hash, enabled],
+            )
+            .unwrap();
+        }
+        fs::write(
+            config.path.join("users.json"),
+            r#"{"provider":"sqlite","path":"data/users.sqlite3"}"#,
+        )
+        .unwrap();
+    } else {
+        let users = users.map(
+            |(id, username, _)| json!({"id": id, "username": username, "password_hash": hash}),
+        );
+        fs::write(
+            config.path.join("users.json"),
+            serde_json::to_vec(&json!({"provider": "file", "users": users})).unwrap(),
+        )
+        .unwrap();
+    }
+    let app = AppState::initialize(&config.path).unwrap().router();
+    (config, app)
+}
+
+// Inspect rendered visibility and order, not the presence of hidden records.
+fn visible_names(body: &str) -> Vec<&str> {
+    body.split("<tr ")
+        .skip(1)
+        .filter_map(|row| {
+            let (attributes, content) = row.split_once('>')?;
+            if attributes.contains("hidden") {
+                return None;
+            }
+            let link = content.split("data-detail-link").nth(1)?;
+            Some(link.split_once('>')?.1.split('<').next().unwrap())
+        })
+        .collect()
+}
+
+fn assert_selected(body: &str, name: &str, value: &str) {
+    let select = body
+        .split(&format!("<select id=\"list-{name}\""))
+        .nth(1)
+        .unwrap()
+        .split("</select>")
+        .next()
+        .unwrap();
+    let option = select
+        .split(&format!("<option value=\"{value}\""))
+        .nth(1)
+        .unwrap()
+        .split('>')
+        .next()
+        .unwrap();
+    assert!(
+        option.contains("selected"),
+        "{name} should select {value}: {select}"
+    );
+}
+
+fn link_url(body: &str, marker: &str) -> String {
+    let tag = body
+        .split('<')
+        .find(|tag| tag.starts_with("a ") && tag.split('>').next().unwrap().contains(marker))
+        .unwrap();
+    tag.split("href=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .replace("&amp;", "&")
+}
+
+#[tokio::test]
+async fn client_list_filters_search_sort_counts_and_defaults() {
+    let (_config, app) = list_fixture(false);
+    let cookie = sign_in(&app).await;
+    let cases: &[(&str, &[&str])] = &[
+        ("", &["ALPHA", "alpha", "Beta", "beta", "zebra", "Zulu"]),
+        (
+            "status=all&auth=all&sort=asc",
+            &["ALPHA", "alpha", "Beta", "beta", "zebra", "Zulu"],
+        ),
+        (
+            "status=unsupported&auth=UPSTREAM&sort=invalid",
+            &["ALPHA", "alpha", "Beta", "beta", "zebra", "Zulu"],
+        ),
+        (
+            "sort=desc",
+            &["Zulu", "zebra", "beta", "Beta", "alpha", "ALPHA"],
+        ),
+        ("status=enabled", &["ALPHA", "beta", "zebra", "Zulu"]),
+        ("status=disabled", &["alpha", "Beta"]),
+        ("auth=local", &["alpha", "zebra"]),
+        ("auth=upstream", &["ALPHA", "Beta", "beta", "Zulu"]),
+        ("q=%20aLpHa%20", &["ALPHA", "alpha"]),
+        ("q=PORTAL", &["ALPHA", "Beta", "beta", "zebra"]),
+        (
+            "status=enabled&auth=upstream&q=PORTAL&sort=desc",
+            &["beta", "ALPHA"],
+        ),
+        ("status=disabled&auth=local&q=REPORTS", &["alpha"]),
+        ("status=disabled&auth=local&q=portal", &[]),
+    ];
+    for (query, expected) in cases {
+        let (status, _, body) = get(&app, &format!("/admin/clients?{query}"), &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(visible_names(&body), *expected, "{query}");
+        let noun = if expected.len() == 1 {
+            "application"
+        } else {
+            "applications"
+        };
+        assert!(body.contains(&format!("{} {noun} found", expected.len())));
+        let state = body
+            .split("data-no-results")
+            .nth(1)
+            .unwrap()
+            .split('>')
+            .next()
+            .unwrap();
+        assert_eq!(!state.contains("hidden"), expected.is_empty());
+        if query.is_empty() || query.contains("unsupported") {
+            assert_selected(&body, "status", "all");
+            assert_selected(&body, "auth", "all");
+            assert_selected(&body, "sort", "asc");
+        }
+    }
+}
+
+#[tokio::test]
+async fn user_filters_support_sqlite_disabled_and_json_enabled_only() {
+    for sqlite in [false, true] {
+        let (config, app) = list_fixture(sqlite);
+        let cookie = sign_in(&app).await;
+        let cases: Vec<(&str, Vec<&str>)> = vec![
+            ("", vec!["ALICE", "alice", "Bob", "zebra"]),
+            ("sort=desc", vec!["zebra", "Bob", "alice", "ALICE"]),
+            (
+                "status=bad&sort=bad&auth=upstream",
+                vec!["ALICE", "alice", "Bob", "zebra"],
+            ),
+            (
+                "status=enabled",
+                if sqlite {
+                    vec!["ALICE", "Bob"]
+                } else {
+                    vec!["ALICE", "alice", "Bob", "zebra"]
+                },
+            ),
+            (
+                "status=disabled",
+                if sqlite {
+                    vec!["alice", "zebra"]
+                } else {
+                    vec![]
+                },
+            ),
+            ("q=AliCe&sort=desc", vec!["alice", "ALICE"]),
+            ("q=USER-3&status=enabled", vec!["Bob"]),
+            (
+                "q=ALICE&status=disabled&sort=desc",
+                if sqlite { vec!["alice"] } else { vec![] },
+            ),
+            ("q=absent", vec![]),
+        ];
+        for (query, expected) in cases {
+            let (status, _, body) = get(&app, &format!("/admin/users?{query}"), &cookie).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(visible_names(&body), expected, "sqlite={sqlite}: {query}");
+            let noun = if expected.len() == 1 { "user" } else { "users" };
+            assert!(body.contains(&format!("{} {noun} found", expected.len())));
+            assert!(body.contains(if sqlite { "SQLite" } else { "JSON" }));
+            assert!(!body.contains("name=\"auth\""));
+            let state = body
+                .split("data-no-results")
+                .nth(1)
+                .unwrap()
+                .split('>')
+                .next()
+                .unwrap();
+            assert_eq!(!state.contains("hidden"), expected.is_empty());
+            if query.is_empty() || query.contains("status=bad") {
+                assert_selected(&body, "status", "all");
+                assert_selected(&body, "sort", "asc");
+            }
+        }
+        if sqlite {
+            let db = rusqlite::Connection::open(config.path.join("data/users.sqlite3")).unwrap();
+            db.execute("DELETE FROM users", []).unwrap();
+            let (_, _, body) = get(&app, "/admin/users?status=disabled", &cookie).await;
+            assert!(body.contains("SQLite") && body.contains("0 users found"));
+            let empty_state = body
+                .split("<div ")
+                .find(|part| part.contains("<h2>No local users available."))
+                .unwrap();
+            assert!(!empty_state.split('>').next().unwrap().contains("hidden"));
+            assert!(
+                body.split("data-no-results")
+                    .nth(1)
+                    .unwrap()
+                    .split('>')
+                    .next()
+                    .unwrap()
+                    .contains("hidden")
+            );
+            db.execute("DROP TABLE users", []).unwrap();
+            let (status, _, body) =
+                get(&app, "/admin/users?status=disabled&sort=desc", &cookie).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert!(body.contains("SQLite") && body.contains("Could not load users."));
+            assert_selected(&body, "status", "disabled");
+            assert_selected(&body, "sort", "desc");
+        }
+    }
+}
+
+#[tokio::test]
+async fn list_links_preserve_controls_and_clear_excluded_user_selection() {
+    let (_config, app) = list_fixture(true);
+    let cookie = sign_in(&app).await;
+    for (section, query, close) in [
+        (
+            "clients",
+            "q=portal&status=enabled&auth=upstream&sort=desc",
+            "data-back-link",
+        ),
+        (
+            "users",
+            "q=USER&status=disabled&sort=desc",
+            "data-close-user",
+        ),
+    ] {
+        let (_, _, body) = get(&app, &format!("/admin/{section}?{query}"), &cookie).await;
+        let detail_url = link_url(&body, "data-detail-link");
+        assert!(detail_url.contains(query));
+        let (status, _, detail) = get(&app, &detail_url, &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        let back_url = link_url(&detail, close);
+        assert_eq!(back_url, format!("/admin/{section}?{query}"));
+        let (_, _, returned) = get(&app, &back_url, &cookie).await;
+        assert_eq!(visible_names(&returned), visible_names(&body));
+        let clear = link_url(&body, "data-clear-search");
+        assert!(!clear.contains("q="));
+        assert!(clear.contains("status=") && clear.contains("sort=desc"));
+        assert_eq!(
+            link_url(&body, "data-reset-list"),
+            format!("/admin/{section}")
+        );
+    }
+    for query in [
+        "status=disabled",
+        "q=missing",
+        "q=ALICE&status=disabled&sort=desc",
+    ] {
+        let (status, headers, _) =
+            get(&app, &format!("/admin/users?id=user-1&{query}"), &cookie).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let target = headers["location"].to_str().unwrap();
+        assert_eq!(target, format!("/admin/users?{query}"));
+        let (_, _, body) = get(&app, target, &cookie).await;
+        assert!(!body.contains("aria-label=\"User details\""));
+    }
+    for path in [
+        "/admin/clients?status=disabled&auth=upstream&sort=desc",
+        "/admin/users?id=user-1&q=absent&status=disabled",
+    ] {
+        let (status, headers, _) = get(&app, path, "pocket_oid_session=ordinary-session").await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(headers["location"], "/admin/login");
+    }
+}
