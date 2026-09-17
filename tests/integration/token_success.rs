@@ -72,7 +72,7 @@ async fn client_specific_ttl_sets_token_expiration() {
 }
 
 #[tokio::test]
-async fn supports_parallel_token_requests() {
+async fn parallel_token_requests_issue_distinct_jtis() {
     let app = test_app("config-basic");
 
     let request = || {
@@ -83,10 +83,20 @@ async fn supports_parallel_token_requests() {
     };
 
     let (first, second) = tokio::join!(request(), request());
+    let (jwks_status, jwks) = get_json(app, "/jwks.json").await;
+    assert_eq!(jwks_status, StatusCode::OK);
 
+    let mut token_ids = Vec::new();
     for (status, body) in [first, second] {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["token_type"], "Bearer");
-        assert!(body["access_token"].as_str().is_some());
+        let token = body["access_token"]
+            .as_str()
+            .expect("access token should be present");
+        let claims = verify_jwt_with_jwks(token, &jwks);
+        let token_id = claims["jti"].as_str().expect("jti should be a string");
+        assert!(!token_id.is_empty());
+        token_ids.push(token_id.to_string());
     }
+    assert_ne!(token_ids[0], token_ids[1], "tokens must have distinct IDs");
 }

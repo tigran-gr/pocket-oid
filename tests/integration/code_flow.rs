@@ -165,6 +165,48 @@ async fn completes_authorization_code_flow() {
 }
 
 #[tokio::test]
+async fn expired_session_cannot_approve_authorization_code() {
+    let state = AppState::initialize(&fixture_config_dir("config-basic")).unwrap();
+    let app = state.router();
+    let redirect_uri = "https://app.example.local/callback";
+    let authorize_path = build_authorize_path("svc-a", redirect_uri, "default", None, None);
+
+    // Negative TTL expires immediately; the valid session is a control without sleeps.
+    for ttl_seconds in [-1, 60] {
+        let session = state
+            .auth_store
+            .create_session("user-alice".to_string(), "alice".to_string(), ttl_seconds)
+            .expect("session should be created");
+        let consent = request(
+            app.clone(),
+            Request::post("/consent")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, format!("session_id={}", session.session_id))
+                .body(Body::from(form_body(&[
+                    ("decision", "approve"),
+                    ("return_to", &authorize_path),
+                ])))
+                .expect("request should build"),
+        )
+        .await;
+        assert_eq!(consent.status(), StatusCode::SEE_OTHER);
+        let location = consent
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("consent response should redirect");
+
+        if ttl_seconds < 0 {
+            assert_eq!(location, "/authorize", "expired session must require login");
+        } else {
+            assert!(location.starts_with(&format!("{redirect_uri}?")));
+            let code = query_value(location, "code").expect("valid session should receive a code");
+            assert!(!code.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
 async fn authenticates_from_sqlite_and_observes_account_changes_without_restart() {
     let config = TempConfigDir::with_sqlite_user();
     let state = AppState::initialize(config.path()).expect("sqlite app state should initialize");
