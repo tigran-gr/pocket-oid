@@ -12,13 +12,13 @@ Run discovery across all modules with:
 python3 -m unittest discover -s tests_blackbox -v
 ```
 
-The Selenium and manual-browser tests remain skipped during discovery unless
-their opt-in environment variables are set.
+The Selenium, manual-browser, and OAuth2 Proxy tests remain skipped during
+discovery unless their opt-in environment variables are set.
 
 GitHub Actions runs the discovery command above after the Rust build and test
-suite. CI explicitly disables all Selenium and manual-browser opt-in flags, so
-it needs only Python 3 and the Rust toolchain; browser drivers, Selenium, and
-Keycloak are not installed or run.
+suite. CI explicitly disables all external-service and browser opt-in flags, so
+it needs only Python 3 and the Rust toolchain; browser drivers, Selenium,
+Keycloak, and OAuth2 Proxy are not installed or run.
 
 ## Retaining Pocket-OID logs
 
@@ -182,3 +182,47 @@ client with that run's exact Pocket-OID callback URI. Log in to the Keycloak
 realm as `keycloak-alice` with password `keycloak-password`. This test configures
 the temporary downstream client to skip Pocket-OID consent. The downstream ID token must have the subject
 `keycloak-local:ff32a9de-d7f1-4dcd-bd4a-2c5ff1c5bdee`.
+
+## Pocket-OID as the provider for OAuth2 Proxy
+
+This automated interoperability test runs three loopback services: Pocket-OID
+as the OpenID Connect provider, a real OAuth2 Proxy process as the OIDC client,
+and a small protected HTTP application behind the proxy. Python's standard
+library submits the login and consent forms; no browser, Selenium, Docker, or
+Java is required.
+
+```sh
+POCKET_OID_OAUTH2_PROXY=1 python3 -m unittest -v \
+  tests_blackbox.test_oauth2_proxy_blackbox
+```
+
+The first opt-in run downloads the release pinned in
+`tools/oauth2-proxy/VERSION`, verifies the archive against the release's SHA-256
+checksum, and caches the executable under `tools/oauth2-proxy/dist/` (ignored by
+Git). The helper supports macOS and Linux on ARM64 and AMD64 and requires `curl`,
+`tar`, and either `sha256sum` or `shasum`. Later runs reuse the cached executable.
+All runtime configuration and sessions are temporary; the test stops its three
+services on completion or failure. Proxy diagnostics are included when startup
+or callback processing fails.
+
+The test checks that anonymous requests are denied, discovery redirects to
+Pocket-OID, the authorization request uses S256 PKCE and a nonce, and login plus
+consent returns to the proxy. OAuth2 Proxy exchanges the code and validates the
+ID token using Pocket-OID's discovered JWKS, issuer, audience, and nonce. The
+protected app must receive the expected subject, and the proxy session must work
+on subsequent requests. Removing cookies denies access again, even with spoofed
+identity headers.
+
+Pocket-OID currently emits only core ID-token claims, with no `email`,
+`email_verified`, or UserInfo endpoint. This test therefore requests `openid`,
+uses `--oidc-email-claim=sub` to populate OAuth2 Proxy's required email field with
+the subject, and disables fetching additional profile claims. The forwarded
+email field is **a subject identifier, not an email address**. This tests core
+OIDC interoperability, not email/domain authorization, profile claims, refresh
+tokens, or logout. The proxy accepts all email domains for this fixture;
+cryptographic validation, issuer/audience validation, nonce validation, and
+Pocket-OID's PKCE requirement remain enabled. Insecure cookies are limited to
+this local HTTP setup.
+
+See [OAuth2 Proxy configuration](https://oauth2-proxy.github.io/oauth2-proxy/configuration/overview/)
+for the claim-mapping and OIDC options.

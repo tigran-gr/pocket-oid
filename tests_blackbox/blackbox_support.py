@@ -364,6 +364,95 @@ class ServerProcess:
             shutil.rmtree(self.config_dir, ignore_errors=True)
 
 
+class OAuth2ProxyProcess:
+    """Real, pinned OIDC relying party for the opt-in interoperability test."""
+
+    def __init__(self):
+        self.port = _pick_free_port()
+        self.base_url = f"http://127.0.0.1:{self.port}"
+        self.redirect_uri = f"{self.base_url}/oauth2/callback"
+        self.process = None
+        self.log_file = None
+
+    def start(self, issuer: str, upstream_url: str):
+        helper = ROOT / "tools" / "oauth2-proxy" / "ensure-oauth2-proxy.sh"
+        result = subprocess.run(
+            ["bash", str(helper)], cwd=ROOT, capture_output=True, text=True, timeout=300
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                f"failed to prepare OAuth2 Proxy:\n{result.stderr.strip()}"
+            )
+        binary = Path(result.stdout.strip())
+        if not binary.is_file():
+            raise AssertionError(f"OAuth2 Proxy helper returned an invalid path: {binary}")
+
+        # Do not inherit unrelated developer proxy configuration into the fixture.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("OAUTH2_PROXY_")}
+        self.log_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+        self.process = subprocess.Popen(
+            [
+                str(binary),
+                "--provider=oidc",
+                f"--oidc-issuer-url={issuer}",
+                "--client-id=svc-a",
+                "--client-secret=supersecret",
+                f"--redirect-url={self.redirect_uri}",
+                f"--http-address=127.0.0.1:{self.port}",
+                f"--upstream={upstream_url}",
+                "--scope=openid",
+                "--code-challenge-method=S256",
+                "--insecure-oidc-skip-nonce=false",
+                # Pocket-OID currently has core claims only, with no email/userinfo.
+                "--oidc-email-claim=sub",
+                "--skip-claims-from-profile-url=true",
+                "--email-domain=*",
+                "--skip-provider-button=true",
+                "--cookie-name=_pocket_oid_proxy",
+                "--cookie-secret=" + base64.urlsafe_b64encode(os.urandom(32)).decode(),
+                "--cookie-secure=false",  # HTTP on loopback, only for this test.
+                "--cookie-refresh=0",
+                "--pass-basic-auth=false",
+                "--pass-user-headers=true",
+                "--set-xauthrequest=true",
+                "--request-logging=false",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=self.log_file,
+            stderr=subprocess.STDOUT,
+        )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
+                raise AssertionError(f"OAuth2 Proxy exited early:\n{self.log_tail()}")
+            try:
+                status, _, _ = http_get_text(f"{self.base_url}/ready")
+                if status == 200:
+                    return
+            except (OSError, urllib.error.URLError):
+                pass
+            time.sleep(0.2)
+        raise AssertionError(f"OAuth2 Proxy did not become ready:\n{self.log_tail()}")
+
+    def log_tail(self):
+        if self.log_file is None:
+            return ""
+        self.log_file.seek(0)
+        return self.log_file.read()[-4000:]
+
+    def stop(self):
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+        if self.log_file is not None:
+            self.log_file.close()
+
+
 class KeycloakProcess:
     def __init__(self, realm_name: str, realm_fixture: Path = KEYCLOAK_REALM_FIXTURE):
         self.realm_name = realm_name

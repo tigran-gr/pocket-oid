@@ -157,8 +157,9 @@ flows, run the ordinary black-box suite using `unittest`:
 python3 -m unittest discover -s tests_blackbox -v
 ```
 
-Run ordinary discovery with the browser opt-in flags unset. Selenium and manual
-tests are skipped by default; ordinary tests use Python's standard library.
+Run ordinary discovery with the browser and external-service opt-in flags unset.
+Selenium, manual, and OAuth2 Proxy tests are skipped by default; ordinary tests
+use Python's standard library.
 The shared `tests_blackbox/blackbox_support.py` creates temporary fixture copies,
 allocates loopback ports, starts processes, and handles callback token exchange.
 Use these helpers when extending the tests.
@@ -184,6 +185,15 @@ Opt-in flags select distinct tests:
 - `POCKET_OID_MANUAL_KEYCLOAK_REAUTH=1`: manual flow with a Keycloak upstream.
 - `POCKET_OID_SELENIUM_CODE_FLOW=1`: automated browser flow; requires the
   dependencies in `tests_blackbox/requirements-selenium.txt` and a browser.
+- `POCKET_OID_OAUTH2_PROXY=1`: automated interoperability with Pocket-OID as the
+  OIDC provider for OAuth2 Proxy and a protected HTTP app; no browser required.
+
+The OAuth2 Proxy test downloads a pinned native executable using
+`tools/oauth2-proxy/ensure-oauth2-proxy.sh` and verifies its release checksum.
+It runs on macOS/Linux ARM64 and AMD64. Its temporary configuration maps `sub`
+into the proxy's required email field because Pocket-OID has no email/UserInfo
+claims; this is core OIDC coverage, not email authorization or profile support.
+Keep PKCE, nonce, signature, issuer, and audience validation enabled.
 
 Manual tests open a browser and wait for user interaction. Keycloak additionally
 requires a compatible Java runtime on `PATH`. Its pinned distribution version

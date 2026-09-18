@@ -26,4 +26,5 @@ jobs:
         POCKET_OID_MANUAL_REAUTH: "0"
         POCKET_OID_MANUAL_KEYCLOAK_REAUTH: "0"
         POCKET_OID_SELENIUM_CODE_FLOW: "0"
+        POCKET_OID_OAUTH2_PROXY: "0"
       run: python3 -m unittest discover -s tests_blackbox -v
