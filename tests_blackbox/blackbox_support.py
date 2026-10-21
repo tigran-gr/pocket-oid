@@ -374,7 +374,7 @@ class OAuth2ProxyProcess:
         self.process = None
         self.log_file = None
 
-    def start(self, issuer: str, upstream_url: str):
+    def start(self, issuer: str, upstream_url: str, email_domain: str = "example.test"):
         helper = ROOT / "tools" / "oauth2-proxy" / "ensure-oauth2-proxy.sh"
         result = subprocess.run(
             ["bash", str(helper)], cwd=ROOT, capture_output=True, text=True, timeout=300
@@ -400,13 +400,12 @@ class OAuth2ProxyProcess:
                 f"--redirect-url={self.redirect_uri}",
                 f"--http-address=127.0.0.1:{self.port}",
                 f"--upstream={upstream_url}",
-                "--scope=openid",
+                "--scope=openid email",
                 "--code-challenge-method=S256",
                 "--insecure-oidc-skip-nonce=false",
-                # Pocket-OID currently has core claims only, with no email/userinfo.
-                "--oidc-email-claim=sub",
+                # Email claims come from the ID token; no UserInfo endpoint is needed.
                 "--skip-claims-from-profile-url=true",
-                "--email-domain=*",
+                f"--email-domain={email_domain}",
                 "--skip-provider-button=true",
                 "--cookie-name=_pocket_oid_proxy",
                 "--cookie-secret=" + base64.urlsafe_b64encode(os.urandom(32)).decode(),

@@ -188,11 +188,15 @@ Opt-in flags select distinct tests:
 - `POCKET_OID_OAUTH2_PROXY=1`: automated interoperability with Pocket-OID as the
   OIDC provider for OAuth2 Proxy and a protected HTTP app; no browser required.
 
-The OAuth2 Proxy test downloads a pinned native executable using
+The OAuth2 Proxy tests download a pinned native executable using
 `tools/oauth2-proxy/ensure-oauth2-proxy.sh` and verifies its release checksum.
-It runs on macOS/Linux ARM64 and AMD64. Its temporary configuration maps `sub`
-into the proxy's required email field because Pocket-OID has no email/UserInfo
-claims; this is core OIDC coverage, not email authorization or profile support.
+They run on macOS/Linux ARM64 and AMD64 and in a separate CI step. Temporary
+users supply real email addresses with explicit verification status, and the
+proxy requests `openid email` and restricts the email domain. Coverage includes
+verified success, unverified rejection, and disallowed-domain rejection. Email
+claims come from the signed ID token; there is no UserInfo endpoint. Local-user
+email is optional in JSON and SQLite (schema v2, migrating v1 transactionally).
+Verification defaults to false and requires trusted verification of the address.
 Keep PKCE, nonce, signature, issuer, and audience validation enabled.
 
 Manual tests open a browser and wait for user interaction. Keycloak additionally

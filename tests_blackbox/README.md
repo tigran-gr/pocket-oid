@@ -16,9 +16,9 @@ The Selenium, manual-browser, and OAuth2 Proxy tests remain skipped during
 discovery unless their opt-in environment variables are set.
 
 GitHub Actions runs the discovery command above after the Rust build and test
-suite. CI explicitly disables all external-service and browser opt-in flags, so
-it needs only Python 3 and the Rust toolchain; browser drivers, Selenium,
-Keycloak, and OAuth2 Proxy are not installed or run.
+suite with opt-in flags disabled, then runs the OAuth2 Proxy interoperability
+tests separately. The proxy step downloads the pinned native executable.
+Browser drivers, Selenium, and Keycloak are not installed or run.
 
 ## Retaining Pocket-OID logs
 
@@ -209,18 +209,20 @@ The test checks that anonymous requests are denied, discovery redirects to
 Pocket-OID, the authorization request uses S256 PKCE and a nonce, and login plus
 consent returns to the proxy. OAuth2 Proxy exchanges the code and validates the
 ID token using Pocket-OID's discovered JWKS, issuer, audience, and nonce. The
-protected app must receive the expected subject, and the proxy session must work
+protected app must receive the expected subject and real email address, and the proxy session must work
 on subsequent requests. Removing cookies denies access again, even with spoofed
 identity headers.
 
-Pocket-OID currently emits only core ID-token claims, with no `email`,
-`email_verified`, or UserInfo endpoint. This test therefore requests `openid`,
-uses `--oidc-email-claim=sub` to populate OAuth2 Proxy's required email field with
-the subject, and disables fetching additional profile claims. The forwarded
-email field is **a subject identifier, not an email address**. This tests core
-OIDC interoperability, not email/domain authorization, profile claims, refresh
-tokens, or logout. The proxy accepts all email domains for this fixture;
-cryptographic validation, issuer/audience validation, nonce validation, and
+The temporary local user has an explicitly verified `alice@example.test`
+address. The proxy requests `openid email`, uses its standard email claim,
+and authorizes only the `example.test` domain. Fetching additional UserInfo
+claims is disabled because Pocket-OID supplies these claims in the ID token.
+Separate negative flows verify rejection of an unverified address and a verified
+address outside the permitted domain. Neither may create an authenticated proxy
+session or reach the protected app. The verification flag is trusted fixture
+data; this does not test an email-verification delivery workflow. Other profile
+claims, refresh tokens, and logout remain outside this test's coverage.
+Cryptographic validation, issuer/audience validation, nonce validation, and
 Pocket-OID's PKCE requirement remain enabled. Insecure cookies are limited to
 this local HTTP setup.
 

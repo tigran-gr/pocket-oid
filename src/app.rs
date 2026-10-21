@@ -53,6 +53,7 @@ pub struct DiscoveryDocument {
     pub token_endpoint_auth_methods_supported: Vec<String>,
     pub id_token_signing_alg_values_supported: Vec<String>,
     pub scopes_supported: Vec<String>,
+    pub claims_supported: Vec<String>,
 }
 
 impl AppState {
@@ -153,6 +154,19 @@ impl DiscoveryDocument {
                 .map(|algorithm| algorithm.as_str().to_string())
                 .collect(),
             scopes_supported: scopes_supported.to_vec(),
+            claims_supported: [
+                "iss",
+                "sub",
+                "aud",
+                "iat",
+                "exp",
+                "nonce",
+                "email",
+                "email_verified",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         }
     }
 }
