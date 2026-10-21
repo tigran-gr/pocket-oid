@@ -180,6 +180,8 @@ inline format:
     {
       "id": "user-alice",
       "username": "alice",
+      "email": "alice@example.test",
+      "email_verified": false,
       "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$..."
     }
   ]
@@ -191,6 +193,26 @@ The file provider accepts Argon2id PHC hashes, legacy `sha256:<hex>` hashes, or
 fast legacy hash and is not suitable for new passwords, and plaintext passwords
 must not be used outside local development.
 
+`email` is optional. `email_verified` defaults to `false` and must be a JSON
+boolean; `true` requires an email address. Set it to `true` only after a trusted
+process has verified control of that specific address. Pocket-OID does not send
+verification emails or infer verification from a successful login, username, or
+email domain. When changing an address, clear its verification status until the
+new address has been verified. Email addresses must have nonempty local and
+domain parts and contain no whitespace or control characters.
+
+Register `email` in the client's `scopes` and request `openid email` at
+`/authorize` to receive `email` and the boolean `email_verified` in the signed
+ID token. Both claims are omitted if the user has no email or the granted scope
+does not contain the exact `email` value. An omitted scope keeps the existing
+default-scope behavior except that `email` always requires explicit opt-in.
+An `openid`-only client continues to receive core claims only. Token-exchange
+parameters cannot expand the code's authorized scopes. These local-user claims
+are not automatically added to access tokens or client-credentials tokens, and
+are not propagated from upstream re-authentication. Discovery advertises the
+claims and configured scopes. No UserInfo endpoint is provided; clients such as
+OAuth2 Proxy can read these claims directly from the ID token.
+
 To use SQLite instead, configure:
 
 ```json
@@ -201,7 +223,7 @@ To use SQLite instead, configure:
 ```
 
 Relative paths resolve against `POCKET_OID_CONFIG_DIR`; absolute paths are also
-accepted. Pocket-OID creates the parent directory, database, and version-1 schema
+accepted. Pocket-OID creates the parent directory, database, and version-2 schema
 if necessary, then requires at least one enabled user. SQLite users are queried
 on every login, so database changes take effect without restarting the service.
 SQLite accepts only Argon2id PHC password hashes. The schema is:
@@ -212,16 +234,26 @@ CREATE TABLE users (
     username      TEXT NOT NULL UNIQUE CHECK (length(username) > 0),
     password_hash TEXT NOT NULL CHECK (length(password_hash) > 0),
     enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    email         TEXT CHECK (email IS NULL OR length(trim(email)) > 0),
+    email_verified INTEGER NOT NULL DEFAULT 0
+                  CHECK (email_verified IN (0, 1) AND (email_verified = 0 OR email IS NOT NULL)),
     created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 ```
 
 Generate a unique-salt Argon2id PHC string with a compatible password-management
 tool before inserting a user. Database encryption is not currently supported;
 protect the database and its backups with appropriate filesystem permissions and
 storage-level encryption.
+
+Existing version-1 user databases migrate transactionally on startup, preserving
+accounts, credentials, status, and timestamps. Their email is initially `NULL`
+and verification status is `0`. SQLite email claims are read by stable user ID
+at token exchange, so subsequent updates and account disabling take effect
+without restarting. Set `email_verified = 1` only after verifying that address;
+update the address and reset `email_verified = 0` together when it changes.
 
 `token_template.json` is the JSON claim template for issued tokens. The supplied
 configuration illustrates the supported runtime placeholders. Keep its `iss`

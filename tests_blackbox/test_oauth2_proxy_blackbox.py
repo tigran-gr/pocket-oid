@@ -57,6 +57,15 @@ class _ProtectedAppHandler(BaseHTTPRequestHandler):
 )
 class OAuth2ProxyBlackBoxTests(unittest.TestCase):
     def test_pocket_oid_authenticates_user_for_oauth2_proxy(self):
+        self._exercise_email_flow("alice@example.test", True, 302)
+
+    def test_oauth2_proxy_rejects_unverified_email(self):
+        self._exercise_email_flow("alice@example.test", False, 500)
+
+    def test_oauth2_proxy_rejects_email_outside_allowed_domain(self):
+        self._exercise_email_flow("alice@other.test", True, 403)
+
+    def _exercise_email_flow(self, email, email_verified, callback_status):
         app = ThreadingHTTPServer(("127.0.0.1", 0), _ProtectedAppHandler)
         self.addCleanup(app.server_close)
         app.requests = []
@@ -74,6 +83,14 @@ class OAuth2ProxyBlackBoxTests(unittest.TestCase):
         def configure(config_dir):
             configure_provider_settings(config_dir, "Pocket-OID for OAuth2 Proxy", provider.base_url)
             enable_openid_scope(config_dir, proxy.redirect_uri, require_pkce=True)
+            clients_path = config_dir / "clients.json"
+            clients = json.loads(clients_path.read_text())
+            clients[0]["scopes"].append("email")
+            clients_path.write_text(json.dumps(clients))
+            users_path = config_dir / "users.json"
+            users = json.loads(users_path.read_text())
+            users["users"][0].update(email=email, email_verified=email_verified)
+            users_path.write_text(json.dumps(users))
 
         provider.configure_config = configure
         provider.start()
@@ -104,7 +121,7 @@ class OAuth2ProxyBlackBoxTests(unittest.TestCase):
         self.assertTrue(authorize_url.startswith(f"{provider.base_url}/authorize?"))
         self.assertEqual(query_value(authorize_url, "client_id"), "svc-a")
         self.assertEqual(query_value(authorize_url, "redirect_uri"), proxy.redirect_uri)
-        self.assertEqual(query_value(authorize_url, "scope"), "openid")
+        self.assertEqual(query_value(authorize_url, "scope"), "openid email")
         self.assertEqual(query_value(authorize_url, "code_challenge_method"), "S256")
         self.assertTrue(query_value(authorize_url, "code_challenge"))
         self.assertTrue(query_value(authorize_url, "nonce"))
@@ -138,13 +155,19 @@ class OAuth2ProxyBlackBoxTests(unittest.TestCase):
 
         # OAuth2 Proxy performs the exchange and validates the ID token itself.
         status, _, headers = request(callback_url)
-        self.assertEqual(status, 302, proxy.log_tail())
+        self.assertEqual(status, callback_status, proxy.log_tail())
+        if callback_status != 302:
+            self.assertFalse(any(cookie.name == "_pocket_oid_proxy" for cookie in cookies))
+            self.assertEqual(app.requests, [])
+            status, _, _ = request(f"{proxy.base_url}/oauth2/auth")
+            self.assertEqual(status, 401)
+            return
         self.assertTrue(any(cookie.name == "_pocket_oid_proxy" for cookie in cookies))
         self.assertEqual(urllib.parse.urljoin(proxy.base_url, headers["Location"]), protected_url)
         status, body, _ = request(protected_url)
         self.assertEqual(status, 200, proxy.log_tail())
         self.assertEqual(json.loads(body), {
-            "path": "/private?report=summary", "user": "user-alice", "email": "user-alice",
+            "path": "/private?report=summary", "user": "user-alice", "email": email,
         })
         self.assertEqual(app.requests, ["/private?report=summary"])
 
@@ -152,12 +175,13 @@ class OAuth2ProxyBlackBoxTests(unittest.TestCase):
         status, _, headers = request(f"{proxy.base_url}/oauth2/auth")
         self.assertEqual(status, 202, proxy.log_tail())
         self.assertEqual(headers["X-Auth-Request-User"], "user-alice")
+        self.assertEqual(headers["X-Auth-Request-Email"], email)
         cookies.clear()
         status, _, _ = request(f"{proxy.base_url}/oauth2/auth")
         self.assertEqual(status, 401)
         status, _, _ = http_get_text(
             protected_url,
-            headers={"X-Forwarded-User": "user-alice", "X-Forwarded-Email": "user-alice"},
+            headers={"X-Forwarded-User": "user-alice", "X-Forwarded-Email": email},
             follow_redirects=False,
         )
         self.assertEqual(status, 302)

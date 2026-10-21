@@ -22,6 +22,7 @@ use crate::{
     frontend,
     token::TokenContext,
     upstream::UpstreamAuthorizationRequest,
+    users::EmailClaims,
 };
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +95,8 @@ struct IdTokenClaims<'a> {
     exp: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     nonce: Option<&'a str>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    email: Option<EmailClaims>,
 }
 
 pub async fn authorize(
@@ -540,6 +543,7 @@ pub async fn token_endpoint(
                 client.client_id.clone(),
                 None,
                 false,
+                None,
             )
         }
         "authorization_code" => {
@@ -571,6 +575,17 @@ pub async fn token_endpoint(
             )?;
             let scope_text = record.scope;
             let issue_id_token = scope_includes_openid(scope_text.as_deref());
+            let email = if issue_id_token
+                && scope_includes(scope_text.as_deref(), "email")
+                && record.auth_context == AuthContext::Local
+            {
+                state
+                    .users
+                    .email_claims(&record.user_id)
+                    .map_err(ApiError::internal)?
+            } else {
+                None
+            };
             issue_token(
                 &state,
                 client,
@@ -578,6 +593,7 @@ pub async fn token_endpoint(
                 record.user_id,
                 record.nonce,
                 issue_id_token,
+                email,
             )
         }
         _ => Err(ApiError::UnsupportedGrantType),
@@ -591,6 +607,7 @@ fn issue_token(
     subject: String,
     nonce: Option<String>,
     include_id_token: bool,
+    email: Option<EmailClaims>,
 ) -> Result<Json<TokenResponse>, ApiError> {
     let issued_at = chrono::Utc::now();
     let ttl = client
@@ -629,6 +646,7 @@ fn issue_token(
             nonce.as_deref(),
             issued_at,
             expires_at,
+            email,
         )?)
     } else {
         None
@@ -650,6 +668,7 @@ fn build_id_token(
     nonce: Option<&str>,
     issued_at: chrono::DateTime<chrono::Utc>,
     expires_at: chrono::DateTime<chrono::Utc>,
+    email: Option<EmailClaims>,
 ) -> Result<String, ApiError> {
     let claims = IdTokenClaims {
         iss: state.provider.issuer.as_str(),
@@ -658,6 +677,7 @@ fn build_id_token(
         iat: issued_at.timestamp(),
         exp: expires_at.timestamp(),
         nonce,
+        email,
     };
     sign_token(state, client, &claims)
 }
@@ -783,6 +803,8 @@ fn validate_scopes(requested: Option<&str>, client: &Client) -> Result<Option<St
                     client
                         .allowed_scopes
                         .iter()
+                        // Email disclosure always requires an explicit scope request.
+                        .filter(|scope| scope.as_str() != "email")
                         .cloned()
                         .collect::<Vec<_>>()
                         .join(" "),
@@ -840,10 +862,14 @@ fn validate_authorize_request<'a>(
 }
 
 fn scope_includes_openid(scope_text: Option<&str>) -> bool {
+    scope_includes(scope_text, "openid")
+}
+
+fn scope_includes(scope_text: Option<&str>, requested: &str) -> bool {
     scope_text
         .into_iter()
         .flat_map(str::split_whitespace)
-        .any(|scope| scope == "openid")
+        .any(|scope| scope == requested)
 }
 
 fn extract_session_id(headers: &HeaderMap) -> Option<String> {

@@ -28,3 +28,7 @@ jobs:
         POCKET_OID_SELENIUM_CODE_FLOW: "0"
         POCKET_OID_OAUTH2_PROXY: "0"
       run: python3 -m unittest discover -s tests_blackbox -v
+    - name: Run OAuth2 Proxy interoperability tests
+      env:
+        POCKET_OID_OAUTH2_PROXY: "1"
+      run: python3 -m unittest -v tests_blackbox.test_oauth2_proxy_blackbox
